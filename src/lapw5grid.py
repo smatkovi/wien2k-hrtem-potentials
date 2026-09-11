@@ -6,9 +6,12 @@ WIEN2k stores densities and potentials (case.clmsum, case.vcoul, ...) as
 lattice harmonics inside the muffin-tin spheres plus a star expansion in the
 interstitial.  Evaluating that representation correctly needs the stars, the
 local rotation matrices, the symmetry operations and the lattice centring;
-lapw5 does all of this.  This module drives the standard 2D mode of lapw5
+lapw5 does all of this.  This module drives the standard 2D mode of lapw5c
 plane by plane (like wien2venus.py of Kurasch et al. 2011) and assembles the
-planes into a 3D array.
+planes into a 3D array.  The complex build lapw5c is always used: it reads
+both columns of the plane-wave coefficients, which structures without
+inversion need (the real lapw5 silently drops the imaginary parts), and it
+gives bit-identical results for centrosymmetric structures.
 
 Why not 3ddens: WIEN2k 24.1 3ddens adds the centring translations only for
 F, B, CXZ and R lattices (SRC_3ddens/3ddens.F:403), so for CXY and CYZ
@@ -31,12 +34,13 @@ spanning the conventional cell including both end planes, x fastest, Å):
     python3 lapw5grid.py --struct case.struct --clm case.vcoul_DFT --sub case.vcoul_IAM --grid ... -o dV.xsf
     python3 lapw5grid.py --struct case.struct --clm case.clmsum --norm tot --grid ... -o rho.xsf
 
-Requires lapw5 on PATH ($WIENROOT) and numpy.
+Requires lapw5c on PATH ($WIENROOT) and numpy.
 """
 
 import argparse
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -163,10 +167,10 @@ class Lapw5Runner:
             if not Path(p).is_file() or Path(p).stat().st_size == 0:
                 sys.exit(f"Error: {p} missing or empty (for case.vcoul: R2V must be set in case.in0)")
             check_clm_header(p)
-        if shutil.which('lapw5') is None:
-            sys.exit("Error: lapw5 not found on PATH (source the WIEN2k environment)")
+        if shutil.which('lapw5c') is None:
+            sys.exit("Error: lapw5c not found on PATH (source the WIEN2k environment)")
         self.sub = clm_b is not None
-        self.nshell = nshell
+        self.nshell = nshell            # minimum; raised per plane if needed
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
         self.keep = keep
         self._tmp = None
@@ -182,6 +186,7 @@ class Lapw5Runner:
             if src:
                 dst.symlink_to(Path(src).resolve())
         self._counter = 0
+        self._grid_calls = 0
 
     def close(self):
         if self._tmp and not self.keep:
@@ -193,12 +198,19 @@ class Lapw5Runner:
         if tag is None:
             self._counter += 1
             tag = f"p{self._counter:05d}"
+        # lapw5 looks for muffin-tin spheres only among the cell origins
+        # -NSHELL..+NSHELL, so every corner of the plane must lie well inside
+        corners = np.array([origin, xend, yend,
+                            np.asarray(xend, float) + np.asarray(yend, float) - np.asarray(origin, float)],
+                           dtype=float)
+        nshell = [max(int(s), int(math.ceil(np.max(np.abs(corners[:, i])) - 1e-9)) + 1)
+                  for i, s in enumerate(self.nshell)]
         wd = self.wd
         in5 = wd / f"{tag}.in5"
         with open(in5, 'w') as f:
             for v in (origin, xend, yend):
                 f.write("%d %d %d %d\n" % _int_vector(v))
-            f.write("%d %d %d\n" % tuple(self.nshell))
+            f.write("%d %d %d\n" % tuple(nshell))
             f.write("%d %d\n" % (npx, npy))
             f.write("RHO SUB \n" if self.sub else "RHO     \n")
             f.write(f"ATU {self.norm} NODEBUG\n")
@@ -215,10 +227,14 @@ class Lapw5Runner:
             f.write(f"20,'{tag}.rho_onedim','unknown','formatted',0\n")
             f.write(f"21,'{tag}.rho','unknown','formatted',0\n")
         env = dict(os.environ, OMP_NUM_THREADS='1')
-        res = subprocess.run(['lapw5', f"{tag}.def"], cwd=wd, capture_output=True, text=True, env=env)
+        res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True, env=env)
         rho = wd / f"{tag}.rho"
-        if res.returncode != 0 or 'STOP LAPW5 END' not in (res.stdout + res.stderr) or not rho.exists():
-            raise RuntimeError(f"lapw5 failed for {tag} (see {wd}/{tag}.output5):\n{res.stdout[-800:]}{res.stderr[-800:]}")
+        if (res.returncode != 0 or not re.search(r'STOP\s+LAPW5C?\s+END', res.stdout + res.stderr)
+                or not rho.exists()):
+            out5 = wd / f"{tag}.output5"
+            tail = out5.read_text(errors='replace')[-1500:] if out5.exists() else ''
+            raise RuntimeError(f"lapw5c failed for plane {tag}:\n{res.stdout[-800:]}{res.stderr[-800:]}\n"
+                               f"--- end of {tag}.output5 ---\n{tail}")
         with open(rho) as f:
             head = f.readline().split()
             vals = np.array(f.read().split(), dtype=np.float64)
@@ -245,10 +261,13 @@ class Lapw5Runner:
         p, q = [ax for ax in range(3) if ax != k]
         out = np.empty(counts)
         nk = counts[k]
+        self._grid_calls += 1
+        call = self._grid_calls                 # file names unique across calls (--workdir)
 
         def job(m):
             o = origin + edges[k] * (m / (nk - 1))
-            plane = self.plane(o, o + edges[p], o + edges[q], counts[p], counts[q], tag=f"g{m:05d}")
+            plane = self.plane(o, o + edges[p], o + edges[q], counts[p], counts[q],
+                               tag=f"g{call:03d}_{m:05d}")
             return m, plane
 
         done = 0

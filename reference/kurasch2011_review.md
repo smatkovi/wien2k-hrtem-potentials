@@ -154,7 +154,9 @@ Near the core the true pixel mean agrees with the Kirkland value to 0.5 %.
 translations only for F, B, CXZ and R lattices (`SRC_3ddens/3ddens.F:403`).
 In every graphene (CXY) XSF written by 3ddens, the atoms at (1/2, 1/3, 0) and
 (1/2, 2/3, 0) therefore have no sphere contribution, only the smooth
-plane-wave value (−206 V instead of −3.9 kV near the nucleus).
+plane-wave value (on the 74 × 128 × 450 grid −206 V instead of −3.9 kV at
+the voxel nearest to the nucleus; on a grid through the nucleus the −1.63 MV
+cusp is missing).
 `src/lapw5grid.py` writes the same XSF with lapw5, which handles the centring;
 it agrees with 3ddens to 1e-8 V everywhere else and to 1e-9 Ry on rutile (P).
 
@@ -163,7 +165,7 @@ it agrees with 3ddens to 1e-8 V everywhere else and to 1e-9 Ry on rutile (P).
 | 75 × 127 × 451 (nuclei on voxels) | 3ddens (2 flagged) | 446 V·Å | 142 V·Å |
 | 75 × 127 × 451 (nuclei on voxels) | lapw5grid (4 flagged) | 446 V·Å | 446 V·Å |
 | 74 × 128 × 450 (existing export; no voxel on a nucleus, 0 flagged) | 3ddens | 871 V·Å (nearest voxel 5.6 mÅ away) | 141 V·Å |
-| 74 × 128 × 450 | lapw5grid | 871 V·Å | 471 V·Å (nearest voxel 11.2 mÅ away) |
+| 74 × 128 × 450 | lapw5grid | 871 V·Å | 471 V·Å (nearest voxel 20.2 mÅ away) |
 
 On the existing grid the −50 kV cutoff never triggers, and the central pixel
 depends strongly on how far the nearest voxel is from the nucleus

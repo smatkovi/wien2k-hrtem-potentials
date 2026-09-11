@@ -11,7 +11,7 @@ Both sides are reduced to one unit cell with identical geometry:
   ixchel:  ixchel_{direction}/atompot*.tif  (output of ixchel image)
 
 A WIEN2k TIFF with the ixchel dim shape covers the NCELL supercell; any other
-shape is ONE unit cell (a duplicated last row/column is dropped) and is first
+shape is ONE unit cell (periodic grid, no repeated edge) and is first
 put on the ixchel supercell grid with tiff2ixchel.tile_fourier.  From both
 supercell images the unit cell is then extracted by Fourier harmonic
 extraction (the unit-cell harmonics sit at multiples of NCELL) and sampled on
@@ -39,7 +39,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tiff2ixchel import tile_fourier, has_duplicate_edges
+from tiff2ixchel import tile_fourier
 
 
 # =============================================================================
@@ -109,13 +109,16 @@ def extract_unit_cell(img, ncell, uc_px):
 # =============================================================================
 
 def parse_cfg(cfg_path):
-    text = Path(cfg_path).read_text()
+    text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())      # drop comments
 
-    ncell_m = re.search(r'NCELL\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', text)
-    dim_m   = re.search(r'dim\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', text)
+    ncell_m = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
+    dim_m   = re.search(r'\bdim\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
 
-    ncell = (int(ncell_m.group(1)), int(ncell_m.group(2))) if ncell_m else (8, 8)
-    dim   = (int(dim_m.group(1)),   int(dim_m.group(2)))   if dim_m   else (512, 512)
+    # ixchel defaults: NCELL = 1×1; dim is required by ixchel main
+    ncell = (int(ncell_m.group(1)), int(ncell_m.group(2))) if ncell_m else (1, 1)
+    if not dim_m:
+        sys.exit(f"ERROR: no 'dim' in {cfg_path}")
+    dim   = (int(dim_m.group(1)),   int(dim_m.group(2)))
 
     size_uc_m = re.search(
         r'size_uc\s*=\s*\{[^}]*?x\s*=\s*([\d.]+)[^}]*?y\s*=\s*([\d.]+)',
@@ -205,8 +208,8 @@ def compare_direction(direction):
         print(f"  Config: {cfg_path}")
         cfg = parse_cfg(cfg_path)
     else:
-        print(f"  WARNING: No .cfg found, using NCELL=[8,8]")
-        cfg = {'ncell': (8, 8), 'dim': (512, 512), 'size_uc': None, 'layers': []}
+        print(f"  ERROR: no .cfg found for [{direction}] (dim and NCELL are needed)")
+        return None
 
     ncx, ncy   = cfg['ncell']
     dimx, dimy = cfg['dim']
@@ -240,10 +243,7 @@ def compare_direction(direction):
     if supercell:
         w_desc = f"supercell {ncx}×{ncy} UC"
     else:
-        dup = has_duplicate_edges(sample)
-        w_uc_px_x, w_uc_px_y = (w_nx - 1, w_ny - 1) if dup else (w_nx, w_ny)
-        w_desc = (f"WIEN2k UC px: {w_uc_px_x}×{w_uc_px_y}"
-                  + (" (duplicated last row/column dropped)" if dup else ""))
+        w_desc = f"WIEN2k UC px: {w_nx}×{w_ny}"
 
     print(f"  WIEN2k: {len(wien_files)} layers, TIFF shape={sample.shape}, {w_desc}")
 
@@ -251,9 +251,7 @@ def compare_direction(direction):
     for f in wien_files:
         raw = read_ixchel_tiff(f).astype(np.float64)
         if not supercell:
-            if has_duplicate_edges(raw):
-                raw = raw[:-1, :-1]
-            # one UC -> ixchel supercell grid (exact Fourier interpolation)
+            # one UC (periodic grid) -> ixchel supercell grid (exact Fourier interpolation)
             raw, _ = tile_fourier(raw, (ncx, ncy), (dimx, dimy))
         wien_layers.append(extract_unit_cell(raw, (ncx, ncy), (uc_px_x, uc_px_y)))
 

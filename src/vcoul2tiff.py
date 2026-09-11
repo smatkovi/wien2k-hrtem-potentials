@@ -30,8 +30,9 @@ GEOMETRY:
   [z0, z0+cz) (subslicing), as in xsf2tiff_dwFactor.py.
   Pixel (i, j) sits at (i·ax/nx, j·by/ny), as in ixchel atompot.
 
-CONVERGENCE (graphene, 15 Å cell): dz = 67 mÅ changes ΔV_z by < 1.3e-5 1/Å
-  against dz = 2 mÅ; 25 mÅ lateral sampling leaves < 1e-5 1/Å aliasing.
+CONVERGENCE (graphene, 15 Å cell, against dz = 5 mÅ): largest ΔV_z error
+  2.7e-5 1/Å at the default dz = 50 mÅ, 1.2e-5 at 25 mÅ, 1.4e-4 at 100 mÅ;
+  25 mÅ lateral sampling leaves < 1e-5 1/Å aliasing.
 
 OUTPUT:
   One unit cell per layer, <outdir>/<cfg filename>, float32 in 1/Å, rows = y.
@@ -46,7 +47,8 @@ POTENTIAL ZERO:
   mean on the plane at cfg depth D is zero (both potentials referenced to the
   vacuum, as the Kirkland term is); the lateral spread on that plane is
   printed and must be small.  A sloped vacuum means a non-neutral starting
-  density: regenerate case.vcoul_IAM and check ':NEC01' in case.outputd.
+  density: regenerate case.vcoul_IAM and verify the dstart run with
+  check_dstart.py.
   Without --vacuum-depth, mean values (⟨DFT − IAM⟩, mean inner potential) are
   not meaningful.
 
@@ -280,6 +282,7 @@ def main():
             vac = {}
             for dd in (-1.0, 0.0, 1.0):
                 o = to_frac @ (t[0] * ex + t[1] * ey + (args.vacuum_depth + dd + t[2]) * ez)
+                o = o - np.floor(o)
                 plane = runner.plane(o, o + np.array(v1, float), o + np.array(v2, float),
                                      nxv + 1, nyv + 1, tag=f'vacuum{int(dd):+d}')
                 vac[dd] = -plane[:nxv, :nyv] * RY_TO_V
@@ -289,8 +292,8 @@ def main():
                   f"spread over the planes at depth ±1 Å: {spread * 1000:.2f} mV")
             if spread > 5e-3:
                 print("    WARNING: ΔV is not constant around the vacuum plane — the planes are not in "
-                      "the vacuum, or the IAM (dstart) density is not neutral; check ':NEC01' and "
-                      "'Normalization of interstitial' in case.outputd and regenerate case.vcoul_IAM")
+                      "the vacuum, or the IAM (dstart) density is not neutral; check the dstart run "
+                      "with check_dstart.py and regenerate case.vcoul_IAM")
 
         for ly in layers:
             ax, by = ly['ax'], ly['by']
@@ -306,6 +309,7 @@ def main():
                   f"ΔV window [{w0:.3f}, {w0 + wlen:.3f}) Å (cfg depth), {nz} steps")
 
             origin = to_frac @ (t[0] * ex + t[1] * ey + (w0 + t[2]) * ez)
+            origin = origin - np.floor(origin)                      # home cell (lapw5 NSHELL)
             edges = [np.array(v1, float), np.array(v2, float), np.array(v3, float) * (wlen / period)]
             dV = runner.grid3d(origin, edges, (nx + 1, ny + 1, nz + 1))
             Vs = -dV[:nx, :ny, :] * RY_TO_V - dv_shift              # V_s = −V_C [V]

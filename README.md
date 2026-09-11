@@ -44,8 +44,9 @@ the band limit).
 
 Tools:
 
-* `src/lapw5grid.py` — evaluates `case.vcoul`, `case.clmsum`, … with lapw5 on
-  planes or 3D grids and writes XSF in the 3ddens convention. Use it instead of
+* `src/lapw5grid.py` — evaluates `case.vcoul`, `case.clmsum`, … with lapw5c
+  (complex build: required for structures without inversion, identical results
+  otherwise) on planes or 3D grids and writes XSF in the 3ddens convention. Use it instead of
   `3ddens` for **CXY/CYZ lattices** (graphene): WIEN2k 24.1 `3ddens` adds the
   centring translations only for F, B, CXZ and R (`SRC_3ddens/3ddens.F:403`) and
   misses the sphere contributions of the centring atoms.
@@ -54,6 +55,8 @@ Tools:
   ixchel's cfg checksum. Required before `ixchel main`.
 * `src/check_transmission.py` — checks ixchel's transmission function
   `trans_<label>.tif` against exp(iσV) of the layer potential.
+* `src/check_dstart.py` — checks a `x dstart` run (IAM density): standard code
+  path, charge renormalisation, `case.rsp` consistent with `case.struct`.
 * `src/compare_all_subsliced.py` — compares `wien2k_<hkl>/` with ixchel's
   `ixchel_<hkl>/` layer potentials on an exactly registered unit cell
   (Pearson r, peak ratio, mean offset, plots).
@@ -64,7 +67,7 @@ Tools:
 
 ## Requirements
 
-* WIEN2k (`$WIENROOT` on `PATH`: `x`, `lapw0`, `dstart`, `lapw5`, `3ddens`)
+* WIEN2k (`$WIENROOT` on `PATH`: `x`, `lapw0`, `dstart`, `lapw5`, `lapw5c`, `3ddens`)
 * ixchel (`ixchel atompot`, `ixchel main`, `ixchel image`) and crystruct
 * Python ≥ 3.10 with numpy, scipy, tifffile, matplotlib, pylibconfig2
 
@@ -86,6 +89,13 @@ After a converged SCF (`run_lapw`), `case.in0` line 2 must read `R2V`, not
 `NR2V`, and must **not** contain `NONORM` (lapw5 needs the standard r²
 normalisation). Edit it with an editor if necessary.
 
+**Two pitfalls of the local WIEN2k build** (details under *Known issues*):
+the Lebedev-point reduction of the patched lapw0 is on by default and distorts
+the density of sites without local mirror planes (graphene: 6.9 % between
+equivalent bonds), so put a file `inlebreduce` containing `F` into the case
+directory *before* `run_lapw`; and WIEN2k 24.1 `dstart` picks its code path at
+random (uninitialised `tau_mode`), so check every run with `check_dstart.py`.
+
 ```bash
 cd ~/wien2k_tests/Graphene
 x lapw0                                   # SCF density -> case.vcoul
@@ -93,21 +103,22 @@ cp Graphene.vcoul Graphene.vcoul_DFT
 
 cp Graphene.clmsum Graphene.clmsum_scf_backup
 x dstart                                  # overwrites case.clmsum with superposed atoms
-grep -E ':NEC01|Normalization of interstitial' Graphene.outputd
+$PY <repo>/src/check_dstart.py Graphene   # must print PASS, otherwise run x dstart again
 x lapw0
 cp Graphene.vcoul Graphene.vcoul_IAM
 cp Graphene.clmsum Graphene.clmsum_IAM           # IAM density, for check 5d
-cp Graphene.clmsum_scf_backup Graphene.clmsum   # restore the SCF density!
+cp Graphene.clmsum_scf_backup Graphene.clmsum   # restore the SCF density
+cp Graphene.vcoul_DFT Graphene.vcoul            # and the SCF potential
 ```
 
-The `grep` must show the `:NEC01` line (nuclear and electronic charge equal)
-and, if needed, the renormalisation. A zero-byte `vcoul` means `NR2V` was
-still set.
+If `check_dstart.py` reports `ZZ != Z`, `case.rsp` was made for another RMT:
+run `x lstart` first. A zero-byte `vcoul` means `NR2V` was still set.
 
 ### 2. crystruct: layer geometry
 
 Create the ixchel crystal cfg with crystruct for the beam direction, e.g.
-`crystruct --ixchel "1 0 0  0 1 0  0 0 1" Graphene.struct` for [001]. Note the
+`crystruct --ixchel "1 0 0  0 1 0  0 0 1" Graphene.struct > Graphene_ixchel_001.cfg`
+for [001] (crystruct writes the cfg to stdout). Note the
 triplet: `vcoul2tiff.py --frame` takes the same nine numbers. crystruct accepts
 both handednesses (the existing Rutile [110] cfg uses `1 -1 0  0 0 1  1 1 0`).
 
@@ -131,8 +142,10 @@ $PY <repo>/src/vcoul2tiff.py \
   is not constant (charged IAM density or plane not in vacuum). Without it the
   ΔV offset follows lapw0's arbitrary potential zero: irrelevant for images,
   but mean values are then meaningless.
-* `--dz` (default 0.05 Å) and `--dx` (0.025 Å) are converged for graphene to
-  about 1e-5 1/Å. Runtime: about 20 s for graphene on 16 cores.
+* `--dz` (default 0.05 Å): largest ΔV_z error 2.7e-5 1/Å for graphene
+  (1.2e-5 at 0.025 Å, 1.4e-4 at 0.1 Å, against 0.005 Å). `--dx` (0.025 Å)
+  leaves < 1e-5 1/Å aliasing. Runtime: about one minute for graphene and half a
+  minute for rutile [110] on 16 cores.
 * Output: `wien2k_001/atompot*.tif`, one unit cell per layer, in 1/Å.
 
 ### 4. ixchel
@@ -156,6 +169,7 @@ and `ixchel main` in a second directory with the same cfgs.
 is pure Kirkland and must reproduce `ixchel atompot`:
 
 ```bash
+cd ~/wien2k_tests/Graphene
 mkdir -p nulltest && cd nulltest
 ln -s ../ixchel_001 ixchel_001                       # ixchel atompot TIFFs + cfg
 $PY <repo>/src/vcoul2tiff.py --vcoul-dft ../Graphene.vcoul_IAM --vcoul-iam ../Graphene.vcoul_IAM \
@@ -167,18 +181,24 @@ Expected: r = 1.0000, ratio = 1.00, mean offset 0.000.
 
 **b) DFT vs IAM comparison and plots.** The same command with the real
 `wien2k_001/` writes `Graphene_subslicing_comparison.png` (line profile, both
-maps, difference).
+maps, difference):
+
+```bash
+cd ~/wien2k_tests/Graphene                 # holds wien2k_001/ (step 3) and ixchel_001/
+$PY <repo>/src/compare_all_subsliced.py -p Graphene -d 001
+```
 
 **c) What ixchel actually uses.** Add `writeTrans = 1;` to `sim.cfg`, run
 `ixchel main`, then
 
 ```bash
+cd ~/wien2k_tests/Graphene/sim_dft_001
 $PY <repo>/src/check_transmission.py --crystal crystal.cfg --sim sim.cfg \
     --pot atompota.tif --trans trans_a.tif \
     --ref-pot ../sim_iam_001/atompota.tif --ref-trans ../sim_iam_001/trans_a.tif
 ```
 
-Expected: |t| = 1 and phase deviations ≲ 1e-7 rad.
+Expected: |t| = 1 and phase deviations ≲ 2e-7 rad (float32).
 
 **d) Independent ΔV cross-check** with the density route. For P, F, B, CXZ
 lattices 3ddens densities are fine; for CXY/CYZ generate them with lapw5grid
@@ -186,6 +206,7 @@ lattices 3ddens densities are fine; for CXY/CYZ generate them with lapw5grid
 `x dstart` in step 1):
 
 ```bash
+cd ~/wien2k_tests/Graphene
 $PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.clmsum     --norm tot --grid 100 100 150 -o Graphene_DFT_rho.xsf
 $PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.clmsum_IAM --norm tot --grid 100 100 150 -o Graphene_IAM_rho.xsf
 $PY <repo>/src/xsf2tiff_dwFactor.py --dft Graphene_DFT_rho.xsf --iam Graphene_IAM_rho.xsf \
@@ -198,9 +219,11 @@ Poisson route has zero-mean ΔV by construction).
 **e) Kurasch et al. route and Fig. 3.**
 
 ```bash
-$PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul --grid 75 127 451 -o Graphene_vcoul.xsf
+cd ~/wien2k_tests/Graphene                 # case.vcoul holds the SCF potential (step 1)
+$PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul_DFT --grid 75 127 451 -o Graphene_vcoul.xsf
 $PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul.xsf --cfg Graphene_ixchel_001.cfg -o wien2k_ulm_001
-lapw5 lapw5_fig3.def        # inputs in reference/lapw5_fig3/
+cp <repo>/reference/lapw5_fig3/* .
+lapw5 lapw5_fig3.def                       # x-z plane through a nucleus, reads Graphene.vcoul
 $PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
 ```
 
@@ -210,12 +233,14 @@ $PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
 |---|---|
 | lapw5grid vs 3ddens, rutile vcoul 138×138×89 | max 1e-9 Ry (output rounding) |
 | lapw5grid vs 3ddens, rutile clmsum 100³ | identical |
-| lapw5grid vs 3ddens, graphene | identical except inside the spheres of the centring atoms (3ddens bug, up to 3.7 kV) |
+| lapw5grid vs 3ddens, graphene | identical except inside the spheres of the centring atoms (3ddens bug; 3.7 kV on the 74×128×450 grid, 1.63 MV where a centring nucleus lies on a voxel) |
+| lapw5c vs lapw5 | identical for rutile (centrosymmetric); GaAs (no inversion) needs lapw5c (lapw5 off by up to 1 Ry) |
 | null test (Kirkland only) vs `ixchel atompot`, tiled | graphene 7.7e-6, rutile [001]/[100] 4.9e-5, [110] 9.3e-5 1/Å |
 | ΔV main route vs Poisson route, rutile [001] (3ddens densities) | r = 1.0000, rms difference 0.4 % of the ΔV rms |
 | ΔV main route vs Poisson route, graphene (lapw5grid densities) | r = 1.0000, rms difference 0.2 % |
 | graphene ΔV symmetry (mirrors / centring shift) | 2e-7 / 1e-4 1/Å |
-| ΔV convergence: dz 67 mÅ vs 2 mÅ; 25 mÅ lateral aliasing | 1.3e-5 / 6e-6 1/Å |
+| graphene 3-fold symmetry (vertical vs inclined bond centres) | broken by 5.4e-3 1/Å — in the SCF input, not in the scripts (see Known issues) |
+| ΔV convergence against dz = 5 mÅ: dz 50 / 25 / 100 mÅ; 25 mÅ lateral aliasing | 2.7e-5 / 1.2e-5 / 1.4e-4 1/Å; 6e-6 1/Å |
 | `ixchel main` transmission vs exp(iσV) | 3.5e-8 rad |
 | graphene mean inner potential, DFT vs Kirkland (neutral IAM, vacuum-referenced) | −15.8 % (paper: 15.5 %) |
 | `x lapw0` recipe reproduces `Graphene.vcoul_DFT` | 1e-15 |
@@ -230,16 +255,38 @@ e.g. `~/wien2k_tests/Rutile/ixchel_110/Rutile_ixchel_110.cfg`.
 
 ## Known issues and open items
 
-* **Regenerate `case.vcoul_IAM`.** The graphene `vcoul_IAM` of 2026-03-15 was
-  not made by the standard path of the installed `dstart`: its `outputd` has
-  no `:NEC01`/renormalisation, the IAM density holds 12.027 instead of 12
-  electrons and its vacuum potential varies by 0.38 V. A fresh `x dstart`
-  gives a neutral density with a flat vacuum. The lateral ΔV structure hardly
-  changes (difference ≤ 0.003 1/Å), the offset does. Check the other
-  materials the same way (step 1 `grep`).
-* `Graphite_ort_IAM_total.xsf` has negative densities and integrates to 49.6
-  instead of 48 electrons; regenerate it before judging the Graphite_ort
-  cross-check (the former r ≈ 0.94 open item).
+* **WIEN2k 24.1 `dstart` is non-deterministic.** `tau_mode` is declared in
+  `SRC_dstart/dstart.F` but never initialised (`init.F` only ever sets it to
+  `.true.`), so a run can take the tau/potential path by accident: no density
+  smoothing, no renormalisation, a charged IAM density. The graphene
+  `vcoul_IAM` of 2026-03-15 is such a run (12.027 instead of 12 electrons,
+  sloped vacuum potential). Check every run with `check_dstart.py` and
+  regenerate the existing `vcoul_IAM` files. The lateral ΔV structure hardly
+  changes (≤ 0.003 1/Å); the offset and the mean inner potential do. The
+  permanent fix is `tau_mode=.false.` in `init.F` (not applied: the WIEN2k tree
+  is left untouched).
+* **Lebedev-point reduction in the patched lapw0** (local commits `0c8e4d9`,
+  `e2356a4`, on by default): `SRC_lapw0/xcpot1.f` keeps only the Lebedev
+  points with local y ≥ 0 and z ≥ 0 for every non-cubic site, i.e. it assumes
+  local mirror planes. The graphene C site (Cmmm, odd-l terms in its LM list)
+  has no mirror along local z. The SCF density at the vertical and inclined
+  bond centres then differs by 6.9 % (ΔV_z by 5.4e-3 1/Å). An SCF rerun with
+  `inlebreduce` = `F` in the review reduced this to 0.12 % and changed the
+  total energy by 42 mRy; a hexagonal k-mesh alone changed nothing. The
+  reduction has been on by default since 2026-01-27 (`e2356a4`), so every SCF
+  run with this lapw0 after that date is suspect (Rutile, Si, FeF2 on
+  2026-02-14; Graphite_ort and Graphene on 2026-02-22); the later lapw0 runs
+  of Rutile and Graphite_ort also print it in `output0`. Whether a site is
+  affected depends on its site symmetry. Rerun the SCFs with
+  `inlebreduce` = `F`, or restrict the reduction to sites that have those
+  mirrors.
+* **Graphite_ort is invalid at the struct level.** Symmetry operations 5–8 of
+  `Graphite_ort.struct` map four atoms onto empty sites (the z+1/2 translation
+  is missing), and its RMT 1.34 does not match `Graphite_ort.rsp` (dstart's ZZ
+  is 6.144 instead of 6). The SCF density, `vcoul_DFT`, every IAM and
+  `Graphite_ort_IAM_total.xsf` (negative densities, 49.6 e) inherit this.
+  Regenerate the struct (`x sgroup`, `x symmetry`), run `x lstart` and the SCF
+  again; the former r ≈ 0.94 open item cannot be judged before that.
 * Handedness of in-plane axes for [010]/[110]: crystruct accepts both. Pass
   the triplet with `--frame` to `vcoul2tiff.py`; `xsf2tiff_dwFactor.py` and
   `vcoul2tiff_ulm.py` use fixed conventions (see their docstrings). For

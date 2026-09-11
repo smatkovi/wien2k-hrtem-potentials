@@ -53,7 +53,7 @@ def cfg_value(text, pattern, what, path):
 
 def main():
     ap = argparse.ArgumentParser(description='Compare ixchel trans_*.tif with exp(i sigma V)')
-    ap.add_argument('--crystal', required=True, help='crystal-structure cfg (NCELL, size_uc)')
+    ap.add_argument('--crystal', required=True, help='crystal-structure cfg (size_uc; NCELL, default 1 1)')
     ap.add_argument('--sim', required=True, help='simulation cfg (dim, v0)')
     ap.add_argument('--pot', required=True, help='layer potential TIFF given to ixchel [1/Å]')
     ap.add_argument('--trans', required=True, help='trans_<label>.tif written by ixchel main')
@@ -63,14 +63,16 @@ def main():
 
     cry = Path(args.crystal).read_text()
     sim = Path(args.sim).read_text()
-    nc = cfg_value(cry, r'\bNCELL\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', 'NCELL', args.crystal)
+    nc = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', re.sub(r'#[^\n]*', '', cry))
+    ncx, ncy = (int(nc.group(1)), int(nc.group(2))) if nc else (1, 1)   # ixchel default
     su = cfg_value(cry, r'size_uc\s*=\s*\{[^}]*?x\s*=\s*([0-9.eE+\-]+)[^}]*?y\s*=\s*([0-9.eE+\-]+)',
                    'size_uc', args.crystal)
     dm = cfg_value(sim, r'\bdim\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', 'dim', args.sim)
     v0 = float(cfg_value(sim, r'\bv0\s*=\s*([0-9.eE+\-]+)', 'v0', args.sim).group(1))
 
-    ax = int(nc.group(1)) * float(su.group(1))       # supercell size [Å], as in ixchel
-    by = int(nc.group(2)) * float(su.group(2))
+    # supercell size [Å] in float32, as ixchel computes it (ixchelfun.cpp, incwf)
+    ax = np.float32(ncx) * np.float32(float(su.group(1)))
+    by = np.float32(ncy) * np.float32(float(su.group(2)))
     nx, ny = int(dm.group(1)), int(dm.group(2))
 
     # electron wavelength [Å] and interaction scale, as in ixchel utils.h / ixchelfun.cpp
@@ -79,10 +81,19 @@ def main():
     sigma = lam * (1.0 + v0 / 511.0)
 
     def band_limit(v):
-        F = np.fft.fft2(v)
-        KX, KY = np.meshgrid(np.fft.fftfreq(nx, d=ax / nx), np.fft.fftfreq(ny, d=by / ny))
-        k2max = (2.0 / 3.0 * min(nx / (2.0 * ax), ny / (2.0 * by)))**2
-        F[KX**2 + KY**2 >= k2max] = 0
+        # ixchel's mask bit for bit: float32 arithmetic, BW = 2.0F/3.0F, keep k² < k2max
+        # (ixchelfun.cpp incwf; slicelib.cpp freqn: index i > n/2 is negative)
+        f32 = np.float32
+
+        def k2(n, a):
+            i = np.arange(n)
+            k = np.where(i > n // 2, i - n, i).astype(f32) / f32(a)
+            return k * k
+
+        kmax = f32(2.0) / f32(3.0) * min(f32(nx) / (f32(2.0) * ax), f32(ny) / (f32(2.0) * by))
+        keep = (k2(ny, by)[:, None] + k2(nx, ax)[None, :]) < f32(kmax) * f32(kmax)
+        F = np.fft.fft2(v)                               # [ny, nx]
+        F[~keep] = 0
         return np.fft.ifft2(F).real
 
     def check(pot_path, trans_path, label):

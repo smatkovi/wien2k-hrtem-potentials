@@ -95,6 +95,9 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 echo "═══ GRAPHITE_ORT ═══"
+echo "WARNING: Graphite_ort.struct lists 4 symmetry operations that are not symmetries of"
+echo "  its atoms (z+1/2 translation missing), and its RMT does not match case.rsp. The SCF"
+echo "  density, vcoul and IAM of this case are invalid until the struct is regenerated."
 cd ~/wien2k_tests/Graphite_ort
 
 if [ -f "Graphite_ort_DFT_total.xsf" ] && [ -f "Graphite_ort_IAM_total.xsf" ]; then

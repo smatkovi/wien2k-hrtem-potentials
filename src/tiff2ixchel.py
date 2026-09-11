@@ -41,19 +41,18 @@ import tifffile
 # ═══════════════════════════════════════════════════════════════
 
 def parse_cfg(cfg_path):
-    """Return dim, NCELL and the unique layer filenames of an ixchel cfg."""
+    """Return dim (None if absent), NCELL (ixchel default 1×1) and the unique
+    layer filenames of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
     text = Path(cfg_path).read_text()
     text_nc = re.sub(r'#[^\n]*', '', text)          # drop comments
 
-    dim_m = re.search(r'\bdim\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', text_nc)
-    ncell_m = re.search(r'\bNCELL\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', text_nc)
-    if not dim_m:
-        sys.exit(f"Error: no 'dim = [nx, ny]' in {cfg_path} (pass --dim)")
-    dim = (int(dim_m.group(1)), int(dim_m.group(2)))
+    dim_m = re.search(r'\bdim\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text_nc)
+    ncell_m = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text_nc)
+    dim = (int(dim_m.group(1)), int(dim_m.group(2))) if dim_m else None
     ncell = (int(ncell_m.group(1)), int(ncell_m.group(2))) if ncell_m else (1, 1)
 
     filenames = []
-    for m in re.finditer(r'\bfilename\s*=\s*"([^"]+)"', text_nc):
+    for m in re.finditer(r'\bfilename\s*[=:]\s*"([^"]+)"', text_nc):
         if m.group(1) not in filenames:
             filenames.append(m.group(1))
     if not filenames:
@@ -171,13 +170,17 @@ def main():
     ap.add_argument('-o', '--output', required=True, help='output directory for ixchel-ready TIFFs')
     ap.add_argument('--dim', type=int, nargs=2, metavar=('NX', 'NY'),
                     help='override dim (must equal dim in simulation.cfg)')
-    ap.add_argument('--keep-edges', action='store_true',
-                    help='do not drop a duplicated last row/column')
+    ap.add_argument('--drop-edges', action='store_true',
+                    help='drop the last row and column; only for TIFFs that repeat their first '
+                         'row/column (XSF general grid) — the scripts in this repository write '
+                         'periodic grids')
     args = ap.parse_args()
 
     dim, ncell, filenames = parse_cfg(args.cfg)
     if args.dim:
         dim = tuple(args.dim)
+    if dim is None:
+        sys.exit(f"Error: no 'dim' in {args.cfg} and no --dim given (ixchel main needs dim)")
     cksum = posix_cksum(args.cfg)
     print(f"cfg {args.cfg}: dim = {dim[0]} x {dim[1]}, NCELL = {ncell[0]} x {ncell[1]}, "
           f"cksum = {cksum}")
@@ -194,9 +197,15 @@ def main():
         if uc.shape == (dim[1], dim[0]) and ncell != (1, 1):
             print(f"  WARNING: {fn} already has the ixchel dim shape {uc.shape}; "
                   f"it is still treated as ONE unit cell")
-        if not args.keep_edges and has_duplicate_edges(uc):
+        if args.drop_edges:
+            if not has_duplicate_edges(uc):
+                print(f"  WARNING: {fn}: --drop-edges given, but the last row/column do not "
+                      f"repeat the first ones")
             uc = uc[:-1, :-1]
-            note = ' (duplicated last row/column dropped)'
+            note = ' (last row/column dropped)'
+        elif has_duplicate_edges(uc):
+            print(f"  NOTE: {fn}: last row/column equal the first ones (flat edges, or an XSF "
+                  f"general grid); kept — pass --drop-edges only for general grids")
         out, dropped = tile_fourier(uc, ncell, dim)
         dst = Path(args.output) / fn
         write_ixchel_tiff(dst, out, cksum)
