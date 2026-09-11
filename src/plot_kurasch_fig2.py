@@ -14,7 +14,7 @@ Usage:
     python3 plot_kurasch_fig2.py --xsf C_single_vcoul.xsf [--Z 6] \\
         [--order auto|F|C] [--coulomb] [-o fig2.png]
 """
-import argparse, sys
+import argparse, itertools, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -53,10 +53,14 @@ def _roughness(d):
 
 def read_xsf(path, order='auto'):
     lines = open(path).readlines()
-    atoms, i = [], 0
+    atoms, vecs, i = [], {}, 0
     data = cell = shape = None
     while i < len(lines):
         tok = lines[i].strip()
+        if tok in ('PRIMVEC', 'CONVVEC'):
+            vecs[tok] = np.array([[float(x) for x in lines[i+1+k].split()[:3]]
+                                  for k in range(3)])
+            i += 4; continue
         if tok == 'PRIMCOORD':
             n = int(lines[i+1].split()[0])
             for k in range(n):
@@ -91,20 +95,48 @@ def read_xsf(path, order='auto'):
         i += 1
     if data is None:
         sys.exit("Error: No DATAGRID_3D found.")
-    return data, cell, shape, atoms
+    return data, cell, shape, atoms, vecs
+
+
+def primitive_vectors(vecs):
+    """Primitive lattice vectors (rows) from PRIMVEC, or None if unusable.
+    The PRIMVEC matrix can come out transposed (seen in 3ddens exports of the
+    CXY graphene lattice), so the orientation is taken in which every CONVVEC
+    vector is an integer combination of the primitive vectors."""
+    P, C = vecs.get('PRIMVEC'), vecs.get('CONVVEC')
+    if P is None or C is None:
+        return None
+    for Q in (P, P.T):
+        if abs(np.linalg.det(Q)) < 1e-8:
+            continue
+        N = C @ np.linalg.inv(Q)
+        if np.allclose(N, np.round(N), atol=1e-3):
+            return Q
+    return None
 
 
 # ── radial line scan along all three axes through the atom ──────────────
-def radial_linescan(data, cell, atom_cart):
+def radial_linescan(data, cell, atom_cart, prim=None):
     (ax, by, cz), (nx, ny, nz) = cell, data.shape
     n_int = (nx-1, ny-1, nz-1)                  # XSF general grid
-    L = (ax, by, cz)
-    idx0 = [int(round(atom_cart[k]/L[k]*n_int[k])) for k in range(3)]
-    idx0 = [min(max(0, idx0[k]), n_int[k]) for k in range(3)]
+    L = np.array((ax, by, cz))
+    # The grid is periodic: wrap the atom (PRIMCOORD may lie outside the cell) and
+    # index modulo n_int (the last plane duplicates the first).  With known
+    # primitive vectors, all lattice images of the atom are candidates and the one
+    # with the deepest potential is taken: 3ddens leaves out the sphere part at
+    # centring-translated sites of CXY/CYZ lattices, where PRIMCOORD puts the atoms.
+    shifts = ([np.zeros(3)] if prim is None else
+              [np.array(n) @ prim for n in itertools.product(range(-2, 3), repeat=3)])
+    ac = idx0 = None
+    for t in shifts:
+        a_img = np.mod(np.asarray(atom_cart, float) + t, L)
+        i_img = tuple(int(round(a_img[k]/L[k]*n_int[k])) % n_int[k] for k in range(3))
+        if idx0 is None or data[i_img] < data[idx0]:
+            ac, idx0 = a_img, i_img
     r_all, v_all = [], []
     for axis in range(3):
         grid = np.arange((nx,ny,nz)[axis]) * L[axis] / n_int[axis]
-        d = grid - atom_cart[axis]
+        d = grid - ac[axis]
         d = np.where(np.abs(d) > L[axis]/2, d - np.sign(d)*L[axis], d)
         if   axis == 0: v = data[:, idx0[1], idx0[2]]
         elif axis == 1: v = data[idx0[0], :, idx0[2]]
@@ -112,7 +144,7 @@ def radial_linescan(data, cell, atom_cart):
         r_all.append(np.abs(d)); v_all.append(v)
     r = np.concatenate(r_all); v = np.concatenate(v_all)
     o = np.argsort(r)
-    return r[o], v[o]
+    return r[o], v[o], ac, idx0
 
 
 def normalize_like_paper(r, v_ry):
@@ -134,7 +166,7 @@ def main():
     args = ap.parse_args()
 
     print(f"[1] XSF: {args.xsf}")
-    data, cell, shape, atoms = read_xsf(args.xsf, args.order)
+    data, cell, shape, atoms, vecs = read_xsf(args.xsf, args.order)
     print(f"    Grid {shape[0]}x{shape[1]}x{shape[2]}, "
           f"cell {cell[0]:.2f}x{cell[1]:.2f}x{cell[2]:.2f} A, {len(atoms)} atom(s)")
     if not atoms:
@@ -142,7 +174,9 @@ def main():
     atom = atoms[0]
     print(f"    Atom Z={atom['Z']} at {np.round(atom['cart'],3)} A")
 
-    r, v_ry = radial_linescan(data, cell, atom['cart'])
+    r, v_ry, ac, idx0 = radial_linescan(data, cell, atom['cart'], primitive_vectors(vecs))
+    print(f"    Line scans through {np.round(ac,3)} A (grid index {list(idx0)}, "
+          f"V = {data[idx0]:.1f} Ry)")
     v = normalize_like_paper(r, v_ry)
 
     r_ref = np.logspace(-2, np.log10(min(cell)/2*0.95), 400)

@@ -9,17 +9,27 @@ a grid point in both directions.  The lapw5 input used for graphene is in
 reference/lapw5_fig3/ (units ATU -> Ry, NONORTHO).
 
 green : projected potential V_z(x) = sum_z V_s(x,z) dz at the fine lateral rate
-blue  : 2-D pixel-area mean of V_z over 30 ppÅ pixels (the "true" pixel value)
+blue  : "ideal" pixel value = true mean of the projected potential over the
+        30 ppÅ pixel column (x, y inside the pixel, z over the cell).  Near the
+        core the 30 ppÅ z-sum (green) is dominated by the single z = 0 plane, so
+        the spherical L=0 part of V_s inside the muffin-tin sphere (from
+        case.vcoul) is integrated finely along z; the smooth remainder
+        (non-spherical part, interstitial) is taken from the lapw5 plane.
+        The paper-style value (2-D mean of the green curve) is printed as well.
 red   : V_z on the 30 ppÅ sub-grid after the nearest-neighbour cutoff, for both
         readings of "highest value in the neighboring pixels" (see
         vcoul2tiff_ulm.py, apply_nn_cutoff)
 black : Kirkland IAM projected potential of carbon for comparison
 
 Usage:
-    python3 plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
+    python3 plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png [case.vcoul case.struct]
+    (case.vcoul / case.struct default to <case>.vcoul / <case>.struct next to the rho file)
 """
+import re
 import sys
+from pathlib import Path
 import numpy as np
+from scipy.interpolate import CubicSpline
 from scipy.special import k0
 import matplotlib
 matplotlib.use('Agg')
@@ -32,6 +42,9 @@ CUTOFF_V = 50000.0
 
 rho_path = sys.argv[1]
 out_png = sys.argv[2]
+_case = Path(rho_path).parent / Path(rho_path).name.split('.rho')[0]
+vcoul_path = sys.argv[3] if len(sys.argv) > 3 else f"{_case}.vcoul"
+struct_path = sys.argv[4] if len(sys.argv) > 4 else f"{_case}.struct"
 
 # ---------------------------------------------------------------- read rho
 with open(rho_path) as f:
@@ -69,14 +82,17 @@ Vz_green = Vs.sum(axis=1) * dz                   # [V*A]
 print(f"green: V_z(0) = {Vz_green[ix0]:.0f} V*A  (without nucleus voxel: {(Vz_green[ix0] - Vs[ix0, iz0]*dz):.0f} V*A)")
 
 # ---------------------------------------------------------------- blue boxes (30 ppA pixels centred on 0, 1/30, 2/30, 3/30)
-# "Ideal" pixel value = area mean of V_z over the 30 ppA pixel.  V_z(r) is taken
-# from the green curve (radially symmetric this close to the core); the sample
-# at r = 0 is the WIEN2k r0 cusp and is not representative of the pixel, so for
-# r < dx the log-divergence  V_z ~ A - B ln r  is fitted to the first samples.
 px = 1.0 / 30                                     # production pixel (30 ppÅ)
 sub = int(round(px / dx))                         # fine samples per pixel
 assert abs(sub * dx - px) < 1e-6, "lateral rate must be a multiple of 30 ppÅ"
 edges = [(-px / 2, px / 2), (px / 2, 3 * px / 2), (3 * px / 2, 5 * px / 2), (5 * px / 2, 7 * px / 2)]
+
+# (a) paper-style pixel value = area mean of the green curve over the 30 ppA pixel.
+# V_z(r) is taken from the green curve (radially symmetric this close to the core);
+# the sample at r = 0 is the WIEN2k r0 cusp and is not representative of the pixel,
+# so for r < dx the log-divergence  V_z ~ A - B ln r  is fitted to the first samples.
+# For r < dz the green samples are dominated by the single z = 0 plane, so this
+# overestimates the central pixel; it is only kept for comparison with the paper.
 rpos = x[ix0 + 1:]; vpos = Vz_green[ix0 + 1:]
 B_, A_ = np.polyfit(np.log(rpos[:4]), vpos[:4], 1)  # V = A + B ln r (B < 0)
 print(f"log fit near core: V_z(r) = {A_:.0f} + ({B_:.0f})*ln r  ->  V_z(dx)={A_+B_*np.log(dx):.0f} (sample {vpos[0]:.0f})")
@@ -90,16 +106,112 @@ def vz_radial(r):
     return out
 
 
-line_mean, blue = [], []
+# (b) ideal pixel value = true mean of the projected potential over the pixel
+# column.  Inside the muffin-tin sphere of the nucleus, V_s = f(r) + remainder with
+#   f(r) = [V_C,00(RMT) - V_C,00(r)] Y_00   (Ry -> V; V_s = -V_C, f(RMT) = 0),
+# the spherical L=0 channel of case.vcoul (stored as V_00*r^2 on the radial mesh of
+# case.struct).  f carries the whole nuclear cusp; it does not depend on the vacuum
+# shift and is continuous at the sphere boundary.  The remainder (non-spherical
+# part, constant V_s,00(RMT), interstitial) is smooth, so its z-sum on the lapw5
+# plane is accurate: R(rho) = green(rho) - sum_z f dz.  f itself is integrated
+# along z exactly, with z = rho*sinh(t) (dz = r dt) removing the 1/r cusp.
+def read_struct_mt(path):
+    """(NPT, R0, RMT) of every inequivalent atom of a WIEN2k case.struct."""
+    return [(int(l[15:20]), float(l[25:35]), float(l[40:50]))
+            for l in Path(path).read_text().splitlines() if 'NPT=' in l]
+
+
+def read_vcoul_l0(path, npts):
+    """V_00(r)*r^2 [Ry*bohr^2] (L=0, M=0 channel) of every atom in case.vcoul."""
+    lines = Path(path).read_text().splitlines()
+    if not any('r**2' in l for l in lines[:5]):
+        sys.exit(f"Error: {path} does not look like a case.vcoul (VC(L,M)*r**2 header)")
+    out, iat, i = {}, None, 0
+    while i < len(lines):
+        m = re.search(r'ATOMNUMBER\s*=\s*(\d+)', lines[i])
+        if m:
+            iat = int(m.group(1))
+        elif (iat is not None and iat not in out
+              and re.search(r'VLM\(R\)\s+FOR\s+L\s+0\s+M=\s*0\b', lines[i])):
+            vals = []
+            i += 1
+            while len(vals) < npts[iat - 1]:
+                vals += [float(v) for v in re.findall(r'[-+]?\d*\.\d+E[-+]\d+', lines[i])]
+                i += 1
+            out[iat] = np.array(vals[:npts[iat - 1]])
+            continue
+        i += 1
+    return [out[k] for k in sorted(out)]
+
+
+mt = read_struct_mt(struct_path)
+v00r2_all = read_vcoul_l0(vcoul_path, [n for n, _, _ in mt])
+Y00 = 1.0 / np.sqrt(4 * np.pi)
+# the plane's nucleus voxel is lapw5's value at r = R0 -> identifies the atom
+iat = int(np.argmin([abs(Y00 * t[0] / r0_**2 - V.min()) for t, (_, r0_, _) in zip(v00r2_all, mt)]))
+npt_mt, r0_mt, rmt_mt = mt[iat]
+v00r2 = v00r2_all[iat]
+r_mesh = r0_mt * np.exp(np.arange(npt_mt) * np.log(rmt_mt / r0_mt) / (npt_mt - 1))   # [bohr]
+spl00 = CubicSpline(r_mesh, v00r2)
+VC_rmt = Y00 * v00r2[-1] / rmt_mt**2                                             # [Ry]
+print(f"L=0 sphere part: atom {iat + 1} of {vcoul_path} (RMT = {rmt_mt * BOHR:.4f} A), "
+      f"V_C(R0) = {Y00 * v00r2[0] / r0_mt**2:.1f} Ry vs plane nucleus voxel {V.min():.1f} Ry")
+
+
+def v00r2_at(rb):
+    """V_00*r^2 at r [bohr]; below R0 the Coulomb form V_00*r^2 ~ r."""
+    rb = np.asarray(rb, float)
+    return np.where(rb >= r0_mt, spl00(np.maximum(rb, r0_mt)), v00r2[0] * rb / r0_mt)
+
+
+def f_sph(r):
+    """f(r) [V] on the lapw5 plane (r [A]); lapw5 evaluates r < R0 at R0."""
+    rb = np.maximum(np.asarray(r, float) / BOHR, r0_mt)
+    return np.where(rb < rmt_mt, (VC_rmt - Y00 * v00r2_at(rb) / rb**2) * RY_TO_V, 0.0)
+
+
+def f_proj(rho):
+    """Exact integral of f along z through the sphere at lateral distance rho [A] -> [V*A]."""
+    rmt_A = rmt_mt * BOHR
+    t = np.linspace(0.0, np.arcsinh(np.sqrt(rmt_A**2 - rho**2) / rho), 20001)
+    r = rho * np.cosh(t)
+    rb = r / BOHR
+    fr = (VC_rmt - Y00 * v00r2_at(rb) / rb**2) * RY_TO_V * r
+    return 2 * np.trapezoid(fr, t)
+
+
+X_, Z_ = np.meshgrid(x - x[ix0], z - z[iz0], indexing='ij')
+R_rem = Vz_green - f_sph(np.sqrt(X_**2 + Z_**2)).sum(axis=1) * dz
+rR, R_pos = x[ix0:] - x[ix0], R_rem[ix0:]
+print(f"smooth remainder R = green - z-sum of f: {R_pos[0]:.2f} (r=0), {R_pos[1]:.2f} (r=dx), "
+      f"{R_pos[sub]:.2f} (r=1/30 A) V*A")
+rho_max = np.hypot(edges[-1][1], px / 2)
+assert rho_max < rmt_mt * BOHR, "pixels must lie inside the muffin-tin sphere"
+lrho = np.linspace(np.log(1e-6), np.log(rho_max * 1.01), 600)
+fz_tab = CubicSpline(lrho, [f_proj(np.exp(v)) for v in lrho])   # smooth in ln(rho)
+
+
+def vz_ideal(r):
+    """True projected potential V_z(r) [V*A]; R is held constant beyond the plane edge."""
+    r = np.asarray(r, float)
+    return np.interp(r, rR, R_pos) + fz_tab(np.log(np.clip(r, 1e-6, None)))
+
+
+print(f"ideal V_z(dx..4dx) = {np.round(vz_ideal(np.arange(1, 5) * dx), 0)} V*A "
+      f"(green samples {np.round(Vz_green[ix0 + 1:ix0 + 5], 0)})")
+
+line_mean, blue, blue_green = [], [], []
 for lo, hi in edges:
     m = (x >= lo - 1e-9) & (x < hi - 1e-9)
     line_mean.append(Vz_green[m].mean())
     xx = np.linspace(lo, hi, 801)[:-1] + (hi - lo) / 1600
     yy = np.linspace(-px / 2, px / 2, 801)[:-1] + px / 1600
     XX, YY = np.meshgrid(xx, yy)
-    blue.append(vz_radial(np.sqrt(XX**2 + YY**2)).mean())
+    blue_green.append(vz_radial(np.sqrt(XX**2 + YY**2)).mean())
+    blue.append(vz_ideal(np.sqrt(XX**2 + YY**2)).mean())
 print("1-D line means incl. r=0 sample [V*A]:", np.round(line_mean, 0))
-print("blue = 2-D pixel-area means [V*A]:   ", np.round(blue, 0))
+print("blue = ideal pixel-column means (fine z integration) [V*A]:        ", np.round(blue, 0))
+print("paper-style = 2-D pixel-area means of the green curve (30 ppA z) [V*A]:", np.round(blue_green, 0))
 
 # ---------------------------------------------------------------- red: 30 ppA lateral subgrid + nn cutoff
 cols = np.arange(ix0 % sub, npx, sub)             # x = ..., -1/30, 0, 1/30, ...
@@ -136,10 +248,11 @@ for rule in ('max', 'min'):
     results[rule] = Vz
     ic = int(np.argmin(np.abs(xg)))
     print(f"red[{rule}]: centre pixel V_z = {Vz[ic]:.0f} V*A, next pixels {Vz[ic+1]:.0f}, {Vz[ic+2]:.0f}; "
-          f"ratio ideal/red = {blue[0]/Vz[ic]:.2f}")
+          f"ratio ideal/red = {blue[0]/Vz[ic]:.2f} (paper-style/red = {blue_green[0]/Vz[ic]:.2f})")
 Vz_nocut = G.sum(axis=1) * dz
 ic = int(np.argmin(np.abs(xg)))
-print(f"no cutoff (30 ppA): centre pixel V_z = {Vz_nocut[ic]:.0f} V*A, ratio to ideal = {Vz_nocut[ic]/blue[0]:.1f}")
+print(f"no cutoff (30 ppA): centre pixel V_z = {Vz_nocut[ic]:.0f} V*A, ratio to ideal = {Vz_nocut[ic]/blue[0]:.1f} "
+      f"(to paper-style = {Vz_nocut[ic]/blue_green[0]:.1f})")
 
 # ---------------------------------------------------------------- Kirkland projected potential for C (reference)
 # fparams.dat layout per element: a1 b1 a2 b2 / a3 b3 c1 d1 / c2 d2 c3 d3

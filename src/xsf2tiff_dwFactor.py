@@ -4,10 +4,27 @@ xsf2tiff.py  —  WIEN2k 3ddens XSF → ixchel projected potential
 
 METHOD (--iam, recommended):
   V_proj = V_Kirkland_IAM + ΔV_proj(Drho)
-  Drho   = rho_DFT - rho_IAM          (bonding correction, smooth, neutral)
-  DV3d   = Poisson_3D(Drho)           [V]
+  Drho   = rho_DFT - rho_IAM          (electron number density difference:
+                                        bonding correction, smooth, neutral)
+  DV3d   = Poisson_3D(Drho)           [V]  ∇²ΔV = +C·Δn: electrostatic potential,
+                                        negative where electrons accumulate
   DV_proj= LineIntegral(DV3d, beam)    [V·Å] via trilinear interpolation
   V_proj = (V_Kirkland + DV_proj) / H2_2PI_ME  [1/Å]
+
+XSF GRID:
+  3ddens writes a general grid: n points span 0..L inclusive, the last plane
+  repeats the first, x varies fastest.  read_xsf drops the repeated planes
+  (n-1 samples per period, spacing L/(n-1)).
+
+ΔV DEPTH WINDOW PER LAYER:
+  crystruct puts the atoms of a layer (positions without z) at the layer's top
+  z0 and makes cz the distance to the next atomic plane; the first plane is
+  moved to depth 0.  The depth offset between that frame and the XSF origin is
+  found by matching the cfg atoms to the XSF atoms.
+  Classical projection: the window is centred on the atomic plane,
+  [plane - d_prev/2, plane + d_next/2), because the Kirkland term of those
+  atoms is fully projected.  Subslicing: the window is the slab [z0, z0+cz),
+  the same slab the Kirkland term is integrated over.
 
 ARBITRARY DIRECTIONS:
   The line integration via map_coordinates projects DV3d along
@@ -20,19 +37,26 @@ PHASE CONVENTION:
 
 UNITS:
   3ddens: rho in e/Bohr³, coordinates in Å
-  CAUTION: 3ddens_total.def (clmsum+clmup) → 1.5× density.
-  With Drho = rho_DFT - rho_IAM the factor cancels out.
+  CAUTION: both XSFs must hold the plain clmsum density (3ddens unit 11 =
+  none).  3ddens_total.def (clmsum+clmup) gives 1.5× the density; a common
+  factor does NOT cancel in Drho = rho_DFT - rho_IAM, it scales ΔV_proj by 1.5.
 
 B-FACTORS (Debye-Waller):
   Computed automatically from Z (same formula as ixchel PeriodicTable.cpp):
     B(Z) = 0.45 * M(Si) / M(Z)  [Å²]
-  Can be overridden via --bfactors Elem:B.
+  Applied as exp(−B·k²) with k = 1/d (ixchel convention), i.e. an rms
+  displacement σ = sqrt(B/(2π²)) per axis.
+  Can be overridden via --bfactors Elem:B (Elem = element symbol, i.e. the
+  leading letters of the cfg atom name, or the exact cfg atom name).
 
-SUBSLICING:
-  If atoms in the cfg have z coordinates (e.g. [0.125, 0.125, 0.5]),
-  the Kirkland scattering factor is computed with finite z limits —
-  exactly like ixchel SliceStack.cpp lines 38–127 (projectedLorentzian/Gaussian).
-  Without z coordinate: full projection (zmin=−∞, zmax=+∞) as before.
+SUBSLICING (Kirkland term, same algorithm as ixchel_atompot.cpp):
+  Classical (default): each layer's own atoms, fully projected
+  (zmin=−∞, zmax=+∞); z coordinates are ignored.
+  subslicing = 1 in the cfg (and no layer used twice in stack_seq): atoms of
+  all slices within max_subslice_distance contribute the part of their
+  potential inside the layer's slab (atom depth = zTop + z·cz of its slice),
+  with ∓∞ limits for the top/bottom layer of the stack
+  (ixchel SliceStack.cpp projectedLorentzian/Gaussian).
 
 Dependencies:
     numpy, scipy, tifffile, pylibconfig2
@@ -45,7 +69,7 @@ Usage:
         -o wien2k_100
 """
 
-import argparse, sys
+import argparse, re, sys
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +82,7 @@ import pylibconfig2
 # ── Constants ─────────────────────────────────────────────────────────────────
 BOHR      = 0.529177210903   # Bohr → Å
 BOHR3     = BOHR**3          # rho [e/Å³] = rho_XSF [e/Bohr³] / BOHR3
-POISSON_C = 180.95           # V·Å²  (= e/ε₀ in Å units)
+POISSON_C = 180.95           # V·Å   (= e/ε₀ in Å units)
 H2_2PI_ME = 47.88            # eV·Å² = h²/(2π m_e e)  [Kirkland unit]
 
 # ── Atomic masses from ixchel PeriodicTable.cpp ──────────────────────────────
@@ -106,7 +130,14 @@ def ixchel_B(Z):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def read_xsf(filename):
-    """Reads 3ddens XSF. Density: e/Bohr³. Coordinates: Å."""
+    """Reads 3ddens XSF. Density: e/Bohr³. Coordinates: Å.
+
+    The XSF general grid has n points per axis spanning 0..L inclusive (last
+    plane = first plane) and lists the values with x fastest (Fortran order).
+    Returned: the n-1 distinct samples per axis, shape (nx-1, ny-1, nz-1),
+    sample (i,j,k) at fractional coordinate (i/(nx-1), j/(ny-1), k/(nz-1));
+    dx, dy, dz = |spanvec_i|/(n_i-1).
+    """
     with open(filename) as f:
         lines = f.readlines()
     primvec = None
@@ -134,16 +165,24 @@ def read_xsf(filename):
             vals = []
             while i < len(lines) and 'END_DATAGRID' not in lines[i]:
                 vals.extend(float(x) for x in lines[i].split()); i += 1
-            data = np.array(vals, dtype=np.float64).reshape(nx, ny, nz)
+            data = np.array(vals, dtype=np.float64).reshape((nx, ny, nz), order='F')
             break
         i += 1
     if primvec is None:
         primvec = spanvec
+    # General grid: the last plane repeats the first one → keep one period
+    edge = max(np.max(np.abs(data[0] - data[-1])),
+               np.max(np.abs(data[:, 0] - data[:, -1])),
+               np.max(np.abs(data[:, :, 0] - data[:, :, -1])))
+    if edge > 1e-6 * max(np.max(np.abs(data)), 1e-30):
+        print(f"    WARNING: {filename}: last grid planes differ from the first "
+              f"ones (max {edge:.3g}); not a periodic general grid?")
+    data = data[:-1, :-1, :-1]
     return {'data': data, 'spanvec': spanvec, 'origin': origin,
-            'shape': (nx, ny, nz), 'atoms': atoms,
-            'dx': np.linalg.norm(spanvec[0]) / nx,
-            'dy': np.linalg.norm(spanvec[1]) / ny,
-            'dz': np.linalg.norm(spanvec[2]) / nz}
+            'shape': data.shape, 'atoms': atoms,
+            'dx': np.linalg.norm(spanvec[0]) / (nx - 1),
+            'dy': np.linalg.norm(spanvec[1]) / (ny - 1),
+            'dz': np.linalg.norm(spanvec[2]) / (nz - 1)}
 
 
 def read_struct_z2sym(filename):
@@ -283,25 +322,105 @@ FPARAMS = {Z: {'a': [v[0], v[2], v[4]], 'b': [v[1], v[3], v[5]],
 # cfg parsing
 # ══════════════════════════════════════════════════════════════════════════════
 
+def label_to_num(label):
+    """Layer label → layer index, as ixchel SliceStack::labelToNum:
+    a..z = 0..25, A..Z = 26..51, suffix '_n_' adds 52·n."""
+    if not label or not (('a' <= label[0] <= 'z') or ('A' <= label[0] <= 'Z')):
+        raise ValueError(f"invalid layer label {label!r}")
+    i = ord(label[0]) - (ord('a') if label[0] >= 'a' else ord('A') - 26)
+    if len(label) == 1:
+        return i
+    if len(label) < 3 or label[1] != '_':
+        raise ValueError(f"invalid layer label {label!r}")
+    m = re.match(r'\s*[+-]?\d+', label[2:])          # atoi()
+    return 52 * (int(m.group()) if m else 0) + i
+
+
+def parse_stack_seq(seq):
+    """stack_seq → list of layer indices, same grammar as ixchel
+    parseStackingSequence (SliceStack.cpp): an optional repeat count N before
+    a letter or a '(...)' group (nesting allowed), letters a..z/A..Z with an
+    optional '_n_' suffix.  Where ixchel would silently stop parsing (unmatched
+    '(' or a malformed '_n_' suffix), a ValueError is raised instead.
+    """
+    out, i, mult = [], 0, 1
+    while i < len(seq):
+        c = seq[i]
+        if c == '(':
+            depth, j = 1, i + 1
+            while j < len(seq) and depth > 0:
+                depth += {'(': 1, ')': -1}.get(seq[j], 0)
+                j += 1
+            if depth:
+                raise ValueError(f"stack_seq {seq!r}: unmatched '('")
+            out += parse_stack_seq(seq[i + 1 : j - 1]) * mult
+            mult, i = 1, j
+        elif '0' <= c <= '9':
+            m = re.match(r'\d+', seq[i:])
+            mult, i = int(m.group()), i + len(m.group())
+        elif ('a' <= c <= 'z') or ('A' <= c <= 'Z'):
+            idx = label_to_num(c)
+            i += 1
+            if i < len(seq) and seq[i] == '_':
+                m = re.match(r'_(\d+)_', seq[i:])
+                if not m:
+                    raise ValueError(f"stack_seq {seq!r}: malformed '_n_' "
+                                     f"suffix after '{c}'")
+                idx += 52 * int(m.group(1))
+                i += len(m.group())
+            out += [idx] * mult
+            mult = 1
+        else:
+            # ixchel prints "Invalid character" and skips it
+            print(f"    WARNING: stack_seq {seq!r}: invalid character {c!r} ignored")
+            i += 1
+    return out
+
+
 def parse_cfg(cfg_path):
     """
     Reads ixchel crystruct.cfg (libconfig format).
-    Returns layers list: ax, by, cz, z0, filename, atoms.
-    atoms: name, Z, proj_x, proj_y (fractional UC coordinates),
-           optional proj_z (for subslicing).
+    Returns:
+      layers : list of the used layers (first occurrence in stack_seq order):
+               label, ax, by, cz, z0 (= zTop of its first slice), filename, atoms
+      slices : the full stack, list of {'label', 'zTop', 'cz'}
+      subslicing, max_subslice_distance : as ixchel_atompot.cpp decides them
+      dim, ncell : ixchel supercell grid (dim required, NCELL default 1 as in
+               ixchel_atompot.cpp / SliceStack.cpp); they set the band limit
+    atoms: name, Z, B, proj_x, proj_y (fractional UC coordinates),
+           proj_z (fractional depth in the slice, default 0 as in ixchel).
     """
     cfg = pylibconfig2.Config(Path(cfg_path).read_text())
 
-    dim   = tuple(cfg.dim)   if hasattr(cfg, 'dim')   else (512, 512)
-    ncell = tuple(cfg.NCELL) if hasattr(cfg, 'NCELL') else (8, 8)
+    if not hasattr(cfg, 'dim'):
+        raise ValueError(f"{cfg_path}: no 'dim' (required by ixchel atompot)")
+    dim   = (int(cfg.dim[0]), int(cfg.dim[1]))
+    ncell = (max(1, int(cfg.NCELL[0])), max(1, int(cfg.NCELL[1]))) \
+        if hasattr(cfg, 'NCELL') else (1, 1)
 
-    # stack_seq = "1(abcd)" → ['a','b','c','d']
-    seq_str = cfg.stack_seq
-    seq = list(seq_str[seq_str.index('(') + 1 : seq_str.index(')')])
+    # stack_seq = "1(abcd)" → slices a, b, c, d (ixchel grammar)
+    seq_str = str(cfg.stack_seq) if hasattr(cfg, 'stack_seq') else ''
+    seq = parse_stack_seq(seq_str)
+    if not seq:
+        raise ValueError(f"{cfg_path}: stack_seq {seq_str!r} defines no slices")
+
+    # Layers are addressed by the index of their label (ixchel parseLayers)
+    names = {}
+    for name in cfg.layers.keys():
+        num = label_to_num(name)
+        if num in names:
+            raise ValueError(f"{cfg_path}: layers '{names[num]}' and '{name}' "
+                             f"have the same index")
+        names[num] = name
+    missing = sorted(set(n for n in seq if n not in names))
+    if missing:
+        raise ValueError(f"{cfg_path}: stack_seq {seq_str!r} uses undefined "
+                         f"layer index(es) {missing}")
 
     # Read layer definitions
     layer_defs = {}
-    for label in seq:
+    for num in seq:
+        label = names[num]
         if label in layer_defs:
             continue
         ly = getattr(cfg.layers, label)
@@ -319,12 +438,12 @@ def parse_cfg(cfg_path):
                         'B':      B_val,
                         'proj_x': float(pos[0]),
                         'proj_y': float(pos[1]),
+                        'proj_z': float(pos[2]) if len(pos) >= 3 else 0.0,
                     }
-                    if len(pos) >= 3:
-                        atom_entry['proj_z'] = float(pos[2])
                     atoms_list.append(atom_entry)
 
         layer_defs[label] = {
+            'label': label,
             'ax': float(ly.size_uc.x),
             'by': float(ly.size_uc.y),
             'cz': float(ly.size_uc.z),
@@ -332,19 +451,30 @@ def parse_cfg(cfg_path):
             'atoms': atoms_list,
         }
 
-    # Stacking sequence → layer list with z0 offset
-    layers = []
+    # Stacking sequence → slices with their top depth; used layers with the
+    # zTop of their first slice
+    slices, layers = [], []
     z0 = 0.0
-    for label in seq:
-        ld = layer_defs[label]
-        layers.append({
-            'label': label, 'ax': ld['ax'], 'by': ld['by'],
-            'cz': ld['cz'], 'z0': z0,
-            'filename': ld['filename'], 'atoms': ld['atoms'],
-        })
+    for num in seq:
+        ld = layer_defs[names[num]]
+        slices.append({'label': ld['label'], 'zTop': z0, 'cz': ld['cz']})
+        if 'z0' not in ld:
+            ld['z0'] = z0
+            layers.append(ld)
         z0 += ld['cz']
 
-    return {'layers': layers, 'dim': dim, 'ncell': ncell, 'total_z': z0}
+    # ixchel_atompot.cpp: subslicing only if requested and no layer is used twice
+    subslicing = int(cfg.subslicing) != 0 if hasattr(cfg, 'subslicing') else False
+    dmax = float(cfg.max_subslice_distance) \
+        if hasattr(cfg, 'max_subslice_distance') else 10.0
+    if subslicing and len(slices) > len(layers):
+        print("    WARNING: a layer is used more than once in stack_seq → "
+              "subslicing deactivated (as in ixchel)")
+        subslicing = False
+
+    return {'layers': layers, 'slices': slices, 'dim': dim, 'ncell': ncell,
+            'total_z': z0, 'subslicing': subslicing,
+            'max_subslice_distance': dmax}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -385,6 +515,76 @@ def beam_frame(spanvec, v1, v2, v3):
     return unit(v1), unit(v2), unit(v3)
 
 
+def cfg_depth_offset(xsf_atoms, cfg, spanvec, ex, ey, ez, v3):
+    """
+    Depth s [Å] of the cfg depth origin along ez in the XSF frame.
+
+    crystruct moves the first atomic plane to depth 0, so the cfg depth frame
+    may be shifted against the XSF origin (Si: atoms at ±(1/8,1/8,1/8)).
+    Candidates are s = depth(first XSF atom) − depth(cfg atom of the same Z);
+    the one for which every XSF atom has a cfg atom of the same Z at the same
+    position (modulo ax, by and the beam period) is chosen.
+    Returns (s, largest remaining atom mismatch [Å]).
+    """
+    period = np.linalg.norm(spanvec.T @ np.array(v3, float))
+    cat = [(at['Z'], at['proj_x'] * ly['ax'], at['proj_y'] * ly['by'],
+            ly['z0'] + at['proj_z'] * ly['cz'], ly['ax'], ly['by'])
+           for ly in cfg['layers'] for at in ly['atoms']]
+    if not xsf_atoms or not cat:
+        return 0.0, np.inf
+
+    def wrap(d, L):
+        return d - L * np.round(d / L)
+
+    def mismatch(s):
+        worst = 0.0
+        for a in xsf_atoms:
+            u, v, d = a['cart'] @ ex, a['cart'] @ ey, a['cart'] @ ez
+            dist = [np.sqrt(wrap(u - cu, cax)**2 + wrap(v - cv, cby)**2 +
+                            wrap(d - cd - s, period)**2)
+                    for Z, cu, cv, cd, cax, cby in cat if Z == a['Z']]
+            worst = max(worst, min(dist) if dist else np.inf)
+        return worst
+
+    a0 = xsf_atoms[0]
+    cands = [(a0['cart'] @ ez - cd) % period for Z, _, _, cd, _, _ in cat
+             if Z == a0['Z']]
+    if not cands:
+        return 0.0, np.inf
+    return min(((s, mismatch(s)) for s in cands), key=lambda x: x[1])
+
+
+def dv_window(layer, cfg):
+    """
+    Depth window (start, length) [Å, cfg depth frame] of the ΔV projection.
+
+    Subslicing: the layer's slab [z0, z0+cz), as for its Kirkland term.
+    Classical: the Kirkland term holds the layer's atoms fully projected, so the
+    window is centred on the layer's atomic plane (crystruct: atoms at the layer
+    top, plane = zTop + z·cz) and reaches half way to the neighbouring planes
+    of the (periodic) stack.
+    """
+    if cfg['subslicing']:
+        return layer['z0'], layer['cz']
+    defs = {ly['label']: ly for ly in cfg['layers']}
+
+    def plane(s):
+        zs = {at['proj_z'] for at in defs[s['label']]['atoms']}
+        if len(zs) > 1:
+            raise ValueError(f"layer '{s['label']}': atoms at different z "
+                             f"{sorted(zs)} — atomic plane (ΔV window) is "
+                             f"ambiguous without subslicing")
+        return s['zTop'] + (zs.pop() if zs else 0.0) * s['cz']
+
+    slices, T = cfg['slices'], cfg['total_z']
+    i = next(k for k, s in enumerate(slices) if s['label'] == layer['label'])
+    p      = plane(slices[i])
+    p_prev = plane(slices[i - 1]) - (T if i == 0 else 0.0)
+    p_next = plane(slices[(i + 1) % len(slices)]) + (T if i == len(slices) - 1 else 0.0)
+    start  = 0.5 * (p_prev + p)
+    return start, 0.5 * (p + p_next) - start
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Line integration (arbitrary direction)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -393,9 +593,11 @@ def project_layer(field3d, spanvec, v1, v2, v3,
                   ax, by, cz, z0, nx_out, ny_out, n_steps=80):
     """
     Projects field3d along v3 for the layer [z0, z0+cz].
+    field3d: one period without repeated planes, sample (i,j,k) at fractional
+    coordinate (i/nX, j/nY, k/nZ).
     Returns: V_proj [field unit · Å], shape (nx_out, ny_out).
     """
-    M_inv  = np.linalg.inv(spanvec)
+    M_inv  = np.linalg.inv(spanvec.T)     # rows of spanvec = lattice vectors
     ex, ey, ez = beam_frame(spanvec, v1, v2, v3)
     nX, nY, nZ = field3d.shape
 
@@ -414,7 +616,7 @@ def project_layer(field3d, spanvec, v1, v2, v3,
         coords = np.array([r_frac[:,:,0].ravel() * nX,
                             r_frac[:,:,1].ravel() * nY,
                             r_frac[:,:,2].ravel() * nZ])
-        proj += (map_coordinates(field3d, coords, order=1, mode='wrap')
+        proj += (map_coordinates(field3d, coords, order=1, mode='grid-wrap')
                   .reshape(nx_out, ny_out) * dt)
     return proj
 
@@ -423,16 +625,20 @@ def project_layer(field3d, spanvec, v1, v2, v3,
 # 3D Poisson
 # ══════════════════════════════════════════════════════════════════════════════
 
-def poisson3d(rho_Ang, dx, dy, dz):
-    """∇²V = −C·ρ  → V [V].  Input: ρ [e/ų]."""
+def poisson3d(rho_Ang, spanvec):
+    """∇²V = +C·n  → electrostatic potential V [V] of the electron number
+    density n [e/ų] (charge density −e·n).  Periodic cell spanned by the rows
+    of spanvec (any cell shape); rho_Ang holds one period."""
     rho_k = fftn(rho_Ang)
-    kx = fftfreq(rho_Ang.shape[0], dx) * 2 * np.pi
-    ky = fftfreq(rho_Ang.shape[1], dy) * 2 * np.pi
-    kz = fftfreq(rho_Ang.shape[2], dz) * 2 * np.pi
-    KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
-    k2 = KX**2 + KY**2 + KZ**2
+    # G = m1·b1 + m2·b2 + m3·b3 with reciprocal vectors b_i (a_i·b_j = 2π δ_ij)
+    B = 2 * np.pi * np.linalg.inv(spanvec).T
+    g = B @ B.T
+    m = [fftfreq(n, 1.0 / n) for n in rho_Ang.shape]      # integer harmonics
+    m1, m2, m3 = m[0][:, None, None], m[1][None, :, None], m[2][None, None, :]
+    k2 = (g[0,0]*m1**2 + g[1,1]*m2**2 + g[2,2]*m3**2
+          + 2*g[0,1]*m1*m2 + 2*g[0,2]*m1*m3 + 2*g[1,2]*m2*m3)
     k2[0,0,0] = 1.0
-    Vk = POISSON_C * rho_k / k2
+    Vk = -POISSON_C * rho_k / k2
     Vk[0,0,0] = 0.0
     return np.real(ifftn(Vk))
 
@@ -518,45 +724,74 @@ def featom_k2(Z, k2, fp, zmin=-np.inf, zmax=np.inf):
     return res
 
 
-def kirkland_layer(atoms_layer, ax, by, Nu, Nv, fp, cz=None):
+def kirkland_layer(layer, cfg, Nu, Nv, fp):
     """
-    Kirkland IAM in Fourier space [1/Å].
+    Kirkland IAM in Fourier space [1/Å] — same algorithm as ixchel_atompot.cpp
+    (func_pot_job, lines 381–487).
 
-    With subslicing (cz given and atom has 'proj_z'):
-      zmin = −proj_z · cz,  zmax = (1−proj_z) · cz
-      → analytic z integration over the layer (ixchel SliceStack.cpp lines 421–445).
+    Classical (cfg['subslicing'] False):
+      the layer's own atoms, zmin = −∞, zmax = +∞ (z coordinates ignored).
 
-    Without subslicing (cz=None or no proj_z):
-      zmin = −∞, zmax = +∞ → full projection as before.
+    Subslicing (cfg['subslicing'] True), layer at depth [z0, z0+cz):
+      every slice S with S.zBottom ≥ z0 − dmax and S.zTop ≤ z0 + cz + dmax
+      contributes all its atoms with
+        zmin = z0 − S.zTop − z·S.cz,  zmax = zmin + cz;
+      zmin = −∞ for the top layer of the stack or the boundary slice above the
+      distance window, zmax = +∞ for the bottom layer or the boundary slice
+      below it.
 
     B-factors come from atom['B'] (automatically via ixchel_B(Z) or cfg DW).
     Phase: exp(−2πi k·r) — same as ixchel (SliceStack.cpp line 445).
+
+    Band limit: ixchel keeps k² ≤ k2max with k2max from the supercell grid
+    (ax·NCELLx over dim_x px, by·NCELLy over dim_y px; ixchel_atompot.cpp
+    lines 331–348), i.e. a circle that tiff2ixchel's square band does not
+    reproduce.  The same circle is applied here, or the unit-cell grid's own
+    circle if that is smaller.
     """
+    ax, by = layer['ax'], layer['by']
+    contrib = []                        # (atom, zmin, zmax)
+    if not cfg['subslicing']:
+        contrib = [(at, -np.inf, np.inf) for at in layer['atoms']]
+    else:
+        slices = cfg['slices']
+        dmax   = cfg['max_subslice_distance']
+        defs   = {ly['label']: ly for ly in cfg['layers']}
+        z0, cz = layer['z0'], layer['cz']
+        is_top    = slices[0]['label'] == layer['label']
+        is_bottom = slices[-1]['label'] == layer['label']
+        for s in slices:
+            s_top = s['zTop']
+            s_bot = s_top + s['cz']
+            if s_bot < z0 - dmax or s_top > z0 + cz + dmax:
+                continue
+            for at in defs[s['label']]['atoms']:
+                zmin = z0 - s_top - at['proj_z'] * s['cz']
+                zmax = z0 + cz - s_top - at['proj_z'] * s['cz']
+                if is_top or (s_bot >= z0 - dmax and s_top < z0 - dmax):
+                    zmin = -np.inf
+                if is_bottom or (s_top <= z0 + cz + dmax and s_bot > z0 + cz + dmax):
+                    zmax = np.inf
+                contrib.append((at, zmin, zmax))
+
     ixmid, iymid = Nu // 2, Nv // 2
     kxv = np.array([i if i < ixmid else i - Nu for i in range(Nu)], float)
     kyv = np.array([i if i < iymid else i - Nv for i in range(Nv)], float)
     KX, KY = np.meshgrid(kxv, kyv, indexing='ij')
 
     k2    = KX**2 / ax**2 + KY**2 / by**2      # [Å⁻²]
-    k2max = 1.0 / max(2*ax/Nu, 2*by/Nv)**2
+    (nx_sc, ny_sc), (ncx, ncy) = cfg['dim'], cfg['ncell']
+    k2max = 1.0 / max(2*ax*ncx/nx_sc, 2*by*ncy/ny_sc, 2*ax/Nu, 2*by/Nv)**2
     mask  = k2 <= k2max
     scale = float(Nu * Nv) / (ax * by)
     pix   = np.zeros((Nu, Nv), dtype=complex)
 
-    for at in atoms_layer:
+    for at, zmin, zmax in contrib:
         Z = at['Z']
         if Z not in fp:
             print(f"    WARNING: Z={Z} ({at['name']}) not in fparams – skipped")
             continue
         B  = at['B']
-
-        # Subslicing: finite z limits if the atom has a z coordinate
-        proj_z = at.get('proj_z', None)
-        if cz is not None and proj_z is not None:
-            zmin = -proj_z * cz
-            zmax = (1.0 - proj_z) * cz
-        else:
-            zmin, zmax = -np.inf, np.inf
 
         fe = featom_k2(Z, k2, fp, zmin, zmax) * np.exp(-B * k2)
         phase = np.exp(-2j * np.pi * (KX * at['proj_x'] + KY * at['proj_y']))
@@ -598,14 +833,18 @@ def write_ixchel_tiff(filename, data_yx):
 def main():
     ap = argparse.ArgumentParser(
         description='WIEN2k 3ddens XSF → ixchel TIF (arbitrary Miller direction)')
-    ap.add_argument('--dft',    required=True)
-    ap.add_argument('--iam',    help='IAM density XSF (method A, recommended)')
+    ap.add_argument('--dft',    required=True,
+                    help='SCF clmsum density XSF (3ddens; for CXY/CYZ lattices '
+                         'lapw5grid.py --norm tot, 3ddens misses the centring atoms)')
+    ap.add_argument('--iam',    help='IAM (dstart) clmsum density XSF, same grid')
     ap.add_argument('--struct', required=True)
     ap.add_argument('--cfg',    help='ixchel crystruct.cfg with layer geometry')
     ap.add_argument('--miller', type=int, nargs=3, default=[0,0,1],
                     metavar=('H','K','L'))
     ap.add_argument('--bfactors', nargs='+', default=[], metavar='Elem:B',
-                    help='override B-factor, e.g. Ti:0.30 O:0.80')
+                    help='override B-factor (ixchel convention exp(-B k²), k=1/d), '
+                         'e.g. Ti:0.30 O:0.80; Elem = element symbol (leading '
+                         'letters of the cfg atom name) or exact cfg atom name')
     ap.add_argument('--nsteps', type=int, default=80,
                     help='integration steps along the beam (default 80)')
     ap.add_argument('-o', '--output', default=None)
@@ -638,9 +877,17 @@ def main():
         sys.exit(1)
 
     print(f"\n[3] Reading cfg: {args.cfg}")
-    cfg    = parse_cfg(args.cfg)
+    try:
+        cfg = parse_cfg(args.cfg)
+    except ValueError as e:
+        print(f"\nERROR: {e}")
+        sys.exit(1)
     layers = cfg['layers']
-    print(f"    {len(layers)} layers, total thickness {cfg['total_z']:.3f} Å")
+    print(f"    {len(layers)} layers, {len(cfg['slices'])} slices, "
+          f"total thickness {cfg['total_z']:.3f} Å, projection: "
+          + ("subslicing (max. distance "
+             f"{cfg['max_subslice_distance']:.3f} Å)" if cfg['subslicing']
+             else "classical"))
 
     # ── B-factors: apply CLI override ─────────────────────────────────────────
     bfactor_override = {}
@@ -649,10 +896,21 @@ def main():
         bfactor_override[el.strip()] = float(val)
 
     if bfactor_override:
+        # key = exact cfg atom name, else element symbol = leading letters of it
+        matched = set()
         for ly in layers:
             for at in ly['atoms']:
-                if at['name'] in bfactor_override:
-                    at['B'] = bfactor_override[at['name']]
+                sym = re.match(r'[A-Za-z]*', at['name'].strip()).group()
+                keys = [k for k in (at['name'], sym) if k in bfactor_override]
+                if keys:
+                    at['B'] = bfactor_override[keys[0]]
+                    matched.update(keys)
+        unmatched = [key for key in bfactor_override if key not in matched]
+        if unmatched:
+            names = sorted(set(at['name'] for ly in layers for at in ly['atoms']))
+            print(f"\nERROR: --bfactors {', '.join(unmatched)} match(es) no cfg "
+                  f"atom (names: {', '.join(names)})")
+            sys.exit(1)
 
     # Print B-factors
     seen = {}
@@ -662,19 +920,31 @@ def main():
             if key not in seen:
                 seen[key] = at['B']
     for (sym, Z), B in sorted(seen.items(), key=lambda x: x[1]):
-        print(f"    {sym}(Z={Z}): B={B:.3f} Å²  σ_DW={np.sqrt(B/(8*np.pi**2))*1000:.1f} mÅ")
+        # exp(−B·k²) with k = 1/d ↔ Gaussian displacement σ² = B/(2π²)
+        print(f"    {sym}(Z={Z}): B={B:.3f} Å²  σ_DW={np.sqrt(B/(2*np.pi**2))*1000:.1f} mÅ")
 
     for ly in layers:
         syms = '+'.join(sorted(set(a['name'] for a in ly['atoms'])))
         print(f"    '{ly['label']}': {syms:>8}  "
               f"ax={ly['ax']:.3f} by={ly['by']:.3f} cz={ly['cz']:.3f} "
               f"z0={ly['z0']:.3f} Å  → {ly['filename']}")
+    try:
+        windows = {ly['label']: dv_window(ly, cfg) for ly in layers}
+    except ValueError as e:
+        print(f"\nERROR: {e}")
+        sys.exit(1)
 
     ex, ey, ez = beam_frame(sv, v1, v2, v3)
     print(f"\n    Projection [{h}{k}{l}]: v1={v1} v2={v2} v3={v3}")
     c_beam = np.linalg.norm(sv.T @ np.array(v3, float))
     print(f"    ê_beam=[{ez[0]:.3f},{ez[1]:.3f},{ez[2]:.3f}]  "
           f"beam path/UC={c_beam:.3f} Å")
+    z_off, z_err = cfg_depth_offset(dft['atoms'], cfg, sv, ex, ey, ez, v3)
+    print(f"    cfg depth 0 at XSF depth {z_off:.3f} Å "
+          f"(largest cfg/XSF atom mismatch {z_err:.3g} Å)")
+    if not z_err < 0.1:
+        print("    WARNING: cfg atoms do not match the XSF atoms — ΔV may be "
+              "misaligned with the Kirkland term")
 
     # ── Mode: deformation density + Kirkland ──────────────────────────────────
     if not args.iam:
@@ -693,7 +963,7 @@ def main():
           + ("(ok)" if abs(net) < 2 else "(WARNING: ≠0)"))
 
     print(f"\n[5] 3D Poisson(Drho) …")
-    DV3d = poisson3d(drho, dx, dy, dz)
+    DV3d = poisson3d(drho, sv)
     print(f"    ΔV3d: [{DV3d.min():.2f},{DV3d.max():.2f}] V")
 
     print(f"\n[6] Kirkland parameters: Z=1..{max(FPARAMS)} (hard-coded)")
@@ -706,24 +976,28 @@ def main():
         cz_l, z0_l = ly['cz'], ly['z0']
         nx_out = max(16, round(ax_l / dx))
         ny_out = max(16, round(by_l / dy))
+        if (nx_out * cfg['ncell'][0] < cfg['dim'][0]
+                or ny_out * cfg['ncell'][1] < cfg['dim'][1]):
+            print(f"    WARNING: '{ly['label']}': unit-cell grid {nx_out}×{ny_out}px "
+                  f"is coarser than dim/NCELL — band limit below ixchel's")
 
-        # ΔV projection
+        # ΔV projection over the layer's depth window (XSF frame)
+        w0_l, wlen_l = windows[ly['label']]
         dv_proj = project_layer(DV3d, sv, v1, v2, v3,
-                                 ax_l, by_l, cz_l, z0_l,
+                                 ax_l, by_l, wlen_l, w0_l + z_off,
                                  nx_out, ny_out, args.nsteps)
         dpot = dv_proj / H2_2PI_ME     # [1/Å]
 
         # Kirkland IAM
-        kirk = kirkland_layer(ly['atoms'], ax_l, by_l,
-                               nx_out, ny_out, fp, cz=cz_l)
+        kirk = kirkland_layer(ly, cfg, nx_out, ny_out, fp)
 
         tot  = kirk + dpot
         syms = '+'.join(sorted(set(a['name'] for a in ly['atoms'])))
-        has_z = any('proj_z' in a for a in ly['atoms'])
-        ss_tag = " [subsliced]" if has_z else ""
+        ss_tag = " [subsliced]" if cfg['subslicing'] else ""
         print(f"  '{ly['label']}' ({syms:>8}) "
               f"ax={ax_l:.3f} by={by_l:.3f} cz={cz_l:.3f} "
-              f"z0={z0_l:.3f}  {nx_out}×{ny_out}px{ss_tag}")
+              f"z0={z0_l:.3f} ΔV window=[{w0_l:.3f},{w0_l + wlen_l:.3f})  "
+              f"{nx_out}×{ny_out}px{ss_tag}")
         print(f"    Kirk=[{kirk.min():.3f},{kirk.max():.3f}]  "
               f"ΔV=[{dpot.min():.3f},{dpot.max():.3f}]  "
               f"tot=[{tot.min():.3f},{tot.max():.3f}] 1/Å")

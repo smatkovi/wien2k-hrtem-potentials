@@ -34,12 +34,24 @@ Sign convention:
 
 XSF conventions (3ddens):
   General grid: n points span 0..L inclusive, the last plane is the periodic
-  image of the first.  Voxel size is L/(n-1); the duplicate plane is dropped
-  before projecting.  Standard XSF data order is x fastest (Fortran order);
-  it is detected automatically because older exports differed.
+  image of the first.  The duplicate end planes are dropped along all three
+  axes right after reading, so cutoff (periodic wrap), normalisation and
+  projection work on the periodic grid of n-1 points with voxel size L/(n-1),
+  and every TIFF holds exactly one period (pixel j at j*L/(n-1), as in ixchel).
+  Standard XSF data order is x fastest (Fortran order); it is detected
+  automatically because older exports differed.
 
 Supported beam directions: [001], [100], [010] (axis-parallel projections).
 General [hkl] would need a rotated/interpolated grid and is rejected.
+Image frame (x = TIFF columns, y = rows, z = layer stacking from 0) and the
+crystruct --ixchel "vx vy vz" triplet whose cfg matches it:
+  [001]:  x = +a, y = +b, z = +c      crystruct --ixchel "1 0 0  0 1 0  0 0 1"
+  [100]:  x = +b, y = +c, z = +a      crystruct --ixchel "0 1 0  0 0 1  1 0 0"
+  [010]:  x = +a, y = +c, z = +b      crystruct --ixchel "1 0 0  0 0 1  0 1 0"
+The [010] frame is left-handed (a x c = -b).  crystruct accepts either
+handedness, so a cfg made with a right-handed triplet such as
+"-1 0 0  0 0 1  0 1 0" (the xsf2tiff_dwFactor.inplane_vectors frame) is
+mirrored in x relative to these TIFFs.
 
 Usage:
     python3 vcoul2tiff_ulm.py \\
@@ -89,12 +101,22 @@ def _reshape_xsf(vals, nx, ny, nz, order):
     if order in ('F', 'C'):
         return arr.reshape((nx, ny, nz), order=order), order
     dF = arr.reshape((nx, ny, nz), order='F')
+    if nx == nz:
+        # the C reshape is then exactly the F reshape with x and z swapped, and
+        # the roughness (a sum over all axes) is identical for both
+        print(f"    data order: 'F' (standard XSF)  [auto-detection cannot discriminate "
+              f"for nx == nz; pass --order C for a non-standard file]")
+        return dF, 'F'
     dC = arr.reshape((nx, ny, nz), order='C')
     rF, rC = _roughness(dF), _roughness(dC)
-    if rF <= rC:
-        print(f"    data order: 'F' (standard XSF)  [roughness F={rF:.3f} < C={rC:.3f}]")
+    if np.isclose(rF, rC, rtol=1e-6, atol=0.0):
+        print(f"    data order: 'F' (standard XSF)  [auto-detection cannot discriminate: "
+              f"roughness F={rF:.6g} ~ C={rC:.6g}; pass --order C for a non-standard file]")
         return dF, 'F'
-    print(f"    data order: 'C' (non-standard)  [roughness C={rC:.3f} < F={rF:.3f}]")
+    if rF < rC:
+        print(f"    data order: 'F' (standard XSF)  [roughness F={rF:.4g} < C={rC:.4g}]")
+        return dF, 'F'
+    print(f"    data order: 'C' (non-standard)  [roughness C={rC:.4g} < F={rF:.4g}]")
     return dC, 'C'
 
 
@@ -141,6 +163,33 @@ def read_xsf(path, order='auto'):
     cz_ang = np.linalg.norm(vc)
 
     return data, (ax_ang, by_ang, cz_ang), (nx, ny, nz)
+
+
+def drop_periodic_duplicates(data):
+    """
+    Remove the duplicated end plane of the XSF general grid along each axis.
+
+    3ddens writes n points spanning 0..L inclusive, so plane n-1 is the
+    periodic image of plane 0.  The plane is dropped only if it really equals
+    plane 0; otherwise a warning is printed and the plane is kept, i.e. that
+    axis is taken as an already periodic grid of n points (voxel size L/n).
+
+    Returns data with the periodic shape (n_x, n_y, n_z); the voxel size along
+    each axis is then L/n for that n.
+    """
+    for ax, name in enumerate('xyz'):
+        n = data.shape[ax]
+        if n < 2:
+            continue
+        first = np.take(data, 0, axis=ax)
+        last  = np.take(data, n - 1, axis=ax)
+        if np.allclose(first, last, rtol=1e-5, atol=1e-8):
+            data = np.take(data, np.arange(n - 1), axis=ax)
+        else:
+            dev = float(np.max(np.abs(first - last)))
+            print(f"    WARNING: last {name} plane differs from the first (max |diff| = "
+                  f"{dev:.3g} Ry); kept, {name} treated as a periodic grid of {n} points")
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,8 +270,8 @@ def parse_cfg(cfg_path):
 def _footprint(stencil, size):
     """Neighbourhood used to pick the replacement value.
     size == 3: 6 face neighbours (stencil=6) or the full 3x3x3 cube (stencil=26).
-    size  > 3: growing cube, only used when a flagged voxel has no valid
-               neighbour at all (cluster of flagged voxels)."""
+    size  > 3: growing cube, only used for flagged voxels that have no valid
+               neighbour in the requested stencil (cluster of flagged voxels)."""
     if stencil == 26 or size > 3:
         return np.ones((size, size, size), dtype=bool)
     fp = np.zeros((3, 3, 3), dtype=bool)
@@ -260,41 +309,47 @@ def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
     Default is the 6 face neighbours (the literal nearest neighbours; with
     nn_value='highest' the 20 edge/corner voxels of a 3x3x3 cube can hardly
     win anyway because they are farther from the nucleus); stencil=26 uses the
-    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic.
+    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic;
+    data_3d must therefore be the periodic grid without the duplicated XSF end
+    planes (drop_periodic_duplicates), otherwise a boundary voxel would see its
+    own flagged copy instead of its true neighbour.
 
-    Clusters.  Only voxels below the threshold are ever changed; if a flagged
-    voxel has no valid neighbour (all flagged) the search cube grows by one
-    shell and the pass is repeated.  Passes repeat until nothing is flagged.
+    Clusters.  Only voxels below the threshold are ever changed, and replacement
+    values are always taken from unflagged voxels.  A flagged voxel with a valid
+    neighbour in the requested stencil takes its value from that stencil; only
+    flagged voxels without any valid stencil neighbour (all flagged) search a
+    cube that grows shell by shell until it contains an unflagged voxel.
 
-    Returns (data, n_replaced).
+    Returns (data, n_replaced) with n_replaced the number of voxels actually
+    replaced.
     """
     data = data_3d.copy()
-    n_replaced = int((data < -cutoff_ry).sum())
-    if n_replaced == 0:
+    flagged = data < -cutoff_ry
+    if not flagged.any():
         return data, 0
 
+    # mask flagged voxels with +/-inf so the rank filter ignores them
+    if nn_value == 'highest':
+        rank_filter, masked = minimum_filter, np.where(flagged, np.inf, data)
+    else:
+        rank_filter, masked = maximum_filter, np.where(flagged, -np.inf, data)
+
+    todo = flagged.copy()
     size = 3
     for _ in range(20):
-        bad = data < -cutoff_ry
-        if not bad.any():
+        nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
+        got = todo & np.isfinite(nb)
+        data[got] = nb[got]
+        todo &= ~got
+        if not todo.any():
             break
-        fp = _footprint(stencil, size)
-        # mask flagged voxels with +/-inf so the rank filter ignores them
-        if nn_value == 'highest':
-            nb = minimum_filter(np.where(bad, np.inf, data), footprint=fp, mode='wrap')
-        else:
-            nb = maximum_filter(np.where(bad, -np.inf, data), footprint=fp, mode='wrap')
-        no_valid = bad & np.isinf(nb)
-        if no_valid.any():
-            size += 2   # cluster of flagged voxels -> widen the search
-            continue
-        data = np.where(bad, nb, data)
-        size = 3        # reset for the next pass
+        size += 2       # cluster of flagged voxels -> widen the search for the rest
 
-    remaining = int((data < -cutoff_ry).sum())
+    remaining = int(todo.sum())
     if remaining > 0:
-        print(f"    WARNING: {remaining} voxels still below -cutoff after 20 passes")
-    return data, n_replaced
+        print(f"    WARNING: {remaining} voxels still below -cutoff "
+              f"(no unflagged voxel within a {size - 2}^3 cube)")
+    return data, int(flagged.sum()) - remaining
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -304,6 +359,10 @@ def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
 def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     """
     Sum the 3D potential over the voxels of one ixchel layer along the beam.
+
+    data_cut and shape describe the periodic grid (duplicate XSF end planes
+    already removed): n points per axis, voxel size L/n.  Image frame: see
+    the module docstring.
 
     Returns:
         proj_yx  : 2D array [nrow=y, ncol=x] in Ry (plain sum, no unit factor)
@@ -328,16 +387,15 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     else:            # [010]: beam along b, sum over axis 1
         n_pts = ny;   span = by_ang;   axis = 1
 
-    # XSF general grid: n_pts points span 0..span INCLUSIVE, i.e. n_pts-1
-    # unique intervals; the last plane duplicates the first.
-    n_int  = max(n_pts - 1, 1)
-    d_proj = span / n_int                       # voxel size [Å]
+    # periodic grid: n_pts unique planes at i*span/n_pts (duplicate end plane
+    # of the XSF general grid already removed)
+    d_proj = span / n_pts                       # voxel size [Å]
 
     # map the layer boundaries (from the cfg) onto voxel planes
-    i_lo = int(round(z0_ang            / span * n_int))
-    i_hi = int(round((z0_ang + cz_lay) / span * n_int))
-    i_lo = max(0, min(i_lo, n_int))
-    i_hi = max(0, min(i_hi, n_int))             # [..:i_hi) never includes plane n_pts-1
+    i_lo = int(round(z0_ang            / span * n_pts))
+    i_hi = int(round((z0_ang + cz_lay) / span * n_pts))
+    i_lo = max(0, min(i_lo, n_pts))
+    i_hi = max(0, min(i_hi, n_pts))
     n_slices = i_hi - i_lo
 
     if n_slices == 0:
@@ -384,7 +442,8 @@ def main():
     ap = argparse.ArgumentParser(
         description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
     ap.add_argument('--xsf',    required=True,
-                    help='total Coulomb potential as XSF (3ddens on case.vcoul)')
+                    help='total Coulomb potential as XSF (3ddens on case.vcoul; for CXY/CYZ '
+                         'lattices use lapw5grid.py, 3ddens misses the centring atoms)')
     ap.add_argument('--cfg',    required=True,
                     help='ixchel crystruct.cfg (layer geometry)')
     ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1],
@@ -393,7 +452,8 @@ def main():
     ap.add_argument('--order',  choices=['auto', 'F', 'C'], default='auto',
                     help='XSF data order (default: auto)')
     ap.add_argument('--cutoff', type=float, default=50000,
-                    help='cutoff in volt (default: 50000, paper: -50 kV)')
+                    help='cutoff magnitude in volt, the sign is ignored: voxels with '
+                         'V_C < -|cutoff| are replaced (default: 50000, paper: -50 kV)')
     ap.add_argument('--stencil', type=int, choices=[6, 26], default=6,
                     help='neighbourhood for the replacement value (default: 6 face neighbours)')
     ap.add_argument('--nn-value', choices=['highest', 'lowest'], default='highest',
@@ -406,21 +466,27 @@ def main():
     args = ap.parse_args()
 
     h, k, l   = args.miller
-    cutoff_Ry = args.cutoff / RY_TO_V   # 50000 V / 13.606 V/Ry ~ 3675 Ry
+    cutoff_V  = abs(args.cutoff)        # paper "-50 kV" in WIEN2k sign == magnitude 50000
+    cutoff_Ry = cutoff_V / RY_TO_V      # 50000 V / 13.606 V/Ry ~ 3675 Ry
     out_dir   = args.output
 
     # -- 1. read XSF -------------------------------------------------
     print(f"\n[1] reading XSF: {args.xsf}")
     data_3d, (ax_ang, by_ang, cz_ang), (nx, ny, nz) = read_xsf(args.xsf, args.order)
-    print(f"    grid:       {nx} x {ny} x {nz} points")
+    print(f"    grid:       {nx} x {ny} x {nz} points (XSF general grid)")
+    data_3d = drop_periodic_duplicates(data_3d)
+    nx, ny, nz = data_3d.shape
+    print(f"    periodic:   {nx} x {ny} x {nz} points (duplicate end planes removed)")
     print(f"    cell:       {ax_ang:.4f} x {by_ang:.4f} x {cz_ang:.4f} Å  "
-          f"({(nx-1)/ax_ang:.1f} x {(ny-1)/by_ang:.1f} x {(nz-1)/cz_ang:.1f} points/Å)")
+          f"({nx/ax_ang:.1f} x {ny/by_ang:.1f} x {nz/cz_ang:.1f} points/Å)")
     print(f"    V_C (raw):  [{data_3d.min():.1f}, {data_3d.max():.3f}] Ry"
           f" = [{data_3d.min()*RY_TO_V:.0f}, {data_3d.max()*RY_TO_V:.2f}] V")
 
     # -- 2. nearest-neighbour cutoff ---------------------------------
-    print(f"\n[2] nearest-neighbour cutoff at -{args.cutoff:.0f} V = -{cutoff_Ry:.1f} Ry "
+    print(f"\n[2] nearest-neighbour cutoff at -{cutoff_V:.0f} V = -{cutoff_Ry:.1f} Ry "
           f"(stencil {args.stencil}, nn-value {args.nn_value})")
+    if args.cutoff < 0:
+        print(f"    (--cutoff {args.cutoff:.0f} taken as magnitude {cutoff_V:.0f} V)")
     n_over = int((data_3d < -cutoff_Ry).sum())
     print(f"    voxels below -cutoff: {n_over} of {data_3d.size} ({100*n_over/data_3d.size:.4f}%)")
     data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry, args.stencil, args.nn_value)

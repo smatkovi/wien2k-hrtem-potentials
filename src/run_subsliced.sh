@@ -1,10 +1,12 @@
 #!/bin/bash
 # Regenerates all WIEN2k potentials with subslicing and runs the comparisons.
-# Usage: cd ~/wien2k_tests && bash <repo>/src/run_subsliced.sh
+# Usage: cd ~/wien2k_tests && [PYTHON=/path/to/venv/bin/python] bash <repo>/src/run_subsliced.sh
+# PYTHON must have numpy, scipy, tifffile, matplotlib and pylibconfig2 (default: python3).
 
 set -e
+PYTHON=${PYTHON:-python3}
 SRC_DIR=$(dirname "$(readlink -f "$0")")
-XSF2TIFF=$SRC_DIR/xsf2tiff_dwFactor.py
+XSF2TIFF=$SRC_DIR/xsf2tiff_dwFactor.py   # Kirkland parameters built in (no fparams.dat)
 COMPARE=$SRC_DIR/compare_all_subsliced.py
 
 echo "════════════════════════════════════════════════════════════════════════"
@@ -36,11 +38,10 @@ for DIR in 001 100 110; do
 
     echo ""
     echo "--- Rutile [$DIR] ---"
-    python3 $XSF2TIFF \
+    "$PYTHON" $XSF2TIFF \
         --dft Rutile_DFT_total.xsf \
         --iam Rutile_IAM_total.xsf \
         --struct Rutile.struct \
-        --fparams fparams.dat \
         --cfg "$CFG" \
         --miller $HKL \
         -o wien2k_${DIR}
@@ -48,7 +49,7 @@ done
 
 echo ""
 echo "--- Rutile comparison ---"
-python3 $COMPARE -p Rutile -d 001 100 110
+"$PYTHON" $COMPARE -p Rutile -d 001 100 110
 
 # ──────────────────────────────────────────────────────────────────────────
 # Si (F→P supercell, orthogonal)
@@ -59,26 +60,22 @@ cd ~/wien2k_tests/Si
 
 # Si needs DFT+IAM XSFs — check whether they exist
 if [ -f "Si_DFT_total.xsf" ] && [ -f "Si_IAM_total.xsf" ]; then
-    FPARAMS=fparams.dat
-    [ ! -f "$FPARAMS" ] && FPARAMS=../Rutile/fparams.dat
-
     CFG_001=Si_ixchel_001.cfg
     [ ! -f "$CFG_001" ] && CFG_001=ixchel_001/Si_ixchel_001.cfg
 
     echo ""
     echo "--- Si [001] ---"
-    python3 $XSF2TIFF \
+    "$PYTHON" $XSF2TIFF \
         --dft Si_DFT_total.xsf \
         --iam Si_IAM_total.xsf \
         --struct Si.struct \
-        --fparams "$FPARAMS" \
         --cfg "$CFG_001" \
         --miller 0 0 1 \
         -o wien2k_001
 
     echo ""
     echo "--- Si comparison ---"
-    python3 $COMPARE -p Si -d 001
+    "$PYTHON" $COMPARE -p Si -d 001
 else
     echo "WARNING: Si_DFT_total.xsf or Si_IAM_total.xsf is missing."
     echo "  Generate them with:"
@@ -101,9 +98,6 @@ echo "═══ GRAPHITE_ORT ═══"
 cd ~/wien2k_tests/Graphite_ort
 
 if [ -f "Graphite_ort_DFT_total.xsf" ] && [ -f "Graphite_ort_IAM_total.xsf" ]; then
-    FPARAMS=fparams.dat
-    [ ! -f "$FPARAMS" ] && FPARAMS=../Rutile/fparams.dat
-
     CFG=Graphite_ixchel_001.cfg
     [ ! -f "$CFG" ] && CFG=ixchel_001/Graphite_ixchel_001.cfg
 
@@ -112,18 +106,17 @@ if [ -f "Graphite_ort_DFT_total.xsf" ] && [ -f "Graphite_ort_IAM_total.xsf" ]; t
 
     echo ""
     echo "--- Graphite_ort [001] ---"
-    python3 $XSF2TIFF \
+    "$PYTHON" $XSF2TIFF \
         --dft Graphite_ort_DFT_total.xsf \
         --iam Graphite_ort_IAM_total.xsf \
         --struct Graphite_ort.struct \
-        --fparams "$FPARAMS" \
         --cfg "$CFG" \
         --miller 0 0 1 \
         -o wien2k_001
 
     echo ""
     echo "--- Graphite_ort comparison ---"
-    python3 $COMPARE -p Graphite_ort -d 001
+    "$PYTHON" $COMPARE -p Graphite_ort -d 001
 else
     echo "WARNING: Graphite_ort DFT/IAM XSFs are missing."
 fi

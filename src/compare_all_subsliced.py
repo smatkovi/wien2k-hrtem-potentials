@@ -6,12 +6,18 @@ Generic — reads NCELL/dim/size_uc automatically from the ixchel .cfg.
 Displayed is the projected electrostatic potential V_z(x,y) in
 Kirkland units [1/Å] (= V·Å / 47.88 V·Å²), as stored in the ixchel TIFFs.
 
-Both sides are cropped to one unit cell:
+Both sides are reduced to one unit cell with identical geometry:
   WIEN2k:  wien2k_{direction}/atompot*.tif  (output of vcoul2tiffFourier.py)
   ixchel:  ixchel_{direction}/atompot*.tif  (output of ixchel image)
 
-If the number of pixels per UC differs, WIEN2k is downsampled to the ixchel
-resolution (not the other way round), so that peak heights are correctly comparable.
+A WIEN2k TIFF with the ixchel dim shape covers the NCELL supercell; any other
+shape is ONE unit cell (a duplicated last row/column is dropped) and is first
+put on the ixchel supercell grid with tiff2ixchel.tile_fourier.  From both
+supercell images the unit cell is then extracted by Fourier harmonic
+extraction (the unit-cell harmonics sit at multiples of NCELL) and sampled on
+round(dim/NCELL) pixels at x_i = i*a/n, so WIEN2k is band-limited to the ixchel
+resolution (not the other way round) and peak heights are comparable, also when
+dim/NCELL is not an integer.
 
 Usage:
     cd ~/wien2k_tests/Rutile
@@ -19,7 +25,6 @@ Usage:
 """
 
 import numpy as np
-from scipy.ndimage import zoom
 from scipy.stats import pearsonr
 import matplotlib
 matplotlib.use('Agg')
@@ -32,6 +37,9 @@ try:
 except ImportError:
     print("ERROR: pip install tifffile --break-system-packages")
     sys.exit(1)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tiff2ixchel import tile_fourier, has_duplicate_edges
 
 
 # =============================================================================
@@ -71,6 +79,29 @@ def read_ixchel_tiff(path):
             if data.ndim == 2:
                 return data
     raise ValueError(f"No float32 data in {path}")
+
+
+def extract_unit_cell(img, ncell, uc_px):
+    """
+    One unit cell from a supercell image by Fourier harmonic extraction.
+    img   : [Ny, Nx] covering NCx x NCy unit cells, pixel (0,0) at the cell origin
+    ncell : (NCx, NCy)
+    uc_px : (nx, ny) output pixels per unit cell
+    returns [ny, nx] sampled at x_i = i*a/nx, y_j = j*b/ny
+    Only the supercell harmonics at multiples of NCELL belong to the lattice
+    period; they are kept strictly below the Nyquist frequency of both grids.
+    """
+    Ny, Nx = img.shape
+    ncx, ncy = ncell
+    nx, ny = uc_px
+    coef = np.fft.fft2(np.asarray(img, dtype=np.float64)) / img.size
+    KX = np.fft.fftfreq(Nx, d=1.0 / Nx).astype(int)
+    KY = np.fft.fftfreq(Ny, d=1.0 / Ny).astype(int)
+    sx = (KX % ncx == 0) & (2 * np.abs(KX) < Nx) & (2 * np.abs(KX // ncx) < nx)
+    sy = (KY % ncy == 0) & (2 * np.abs(KY) < Ny) & (2 * np.abs(KY // ncy) < ny)
+    target = np.zeros((ny, nx), dtype=complex)
+    target[np.ix_((KY[sy] // ncy) % ny, (KX[sx] // ncx) % nx)] = coef[np.ix_(sy, sx)]
+    return (np.fft.ifft2(target) * (nx * ny)).real
 
 
 # =============================================================================
@@ -115,7 +146,11 @@ def parse_cfg(cfg_path):
                     break
 
         block = text[block_start:block_end]
-        atom_names = re.findall(r'name\s*=\s*"(\w+)"', block)
+        # crystruct names may carry a site label ("C 1", "Si1"): keep the element symbol
+        atom_names = []
+        for name in re.findall(r'\bname\s*=\s*"([^"]+)"', block):   # not 'filename'
+            sym = re.match(r'\s*([A-Z][a-z]?)', name)
+            atom_names.append(sym.group(1) if sym else name.strip())
 
         unique = []
         seen = set()
@@ -175,8 +210,10 @@ def compare_direction(direction):
 
     ncx, ncy   = cfg['ncell']
     dimx, dimy = cfg['dim']
-    uc_px_x    = dimx // ncx
-    uc_px_y    = dimy // ncy
+    # dim/NCELL need not be an integer (graphene 512/13 = 39.38): both sides are
+    # sampled on round(dim/NCELL) pixels spanning exactly one unit cell
+    uc_px_x    = int(round(dimx / ncx))
+    uc_px_y    = int(round(dimy / ncy))
     uc_shape   = (uc_px_y, uc_px_x)   # (rows, cols) = (y, x)
 
     size_uc = cfg.get('size_uc')
@@ -197,30 +234,28 @@ def compare_direction(direction):
     sample = read_ixchel_tiff(wien_files[0])
     w_ny, w_nx = sample.shape
 
-    # WIEN2k TIFF from xsf2tiff.py: always 1 UC per file.
-    # The physical UC resolution (px/Å) is ≈ the XSF grid for xsf2tiff (~0.046 Å/px),
-    # and ≈ dim/ncell/uc_ang for ixchel (~0.072 Å/px).
-    # If WIEN2k has more pixels/Å than ixchel → xsf2tiff output (1 UC).
-    # Simplest test: w_nx > uc_px_x or w_ny > uc_px_y → full TIFF = 1 UC.
-    if w_nx >= uc_px_x or w_ny >= uc_px_y:
-        # xsf2tiff: full TIFF = 1 UC
-        w_uc_px_x, w_uc_px_y = w_nx, w_ny
+    # A TIFF with the ixchel dim shape covers the NCELL supercell (tiff2ixchel.py
+    # output); any other shape is ONE unit cell (vcoul2tiff*.py, xsf2tiff*.py).
+    supercell = (w_ny, w_nx) == (dimy, dimx)
+    if supercell:
+        w_desc = f"supercell {ncx}×{ncy} UC"
     else:
-        # Old format: ncell tiling
-        w_uc_px_x = w_nx // ncx
-        w_uc_px_y = w_ny // ncy
+        dup = has_duplicate_edges(sample)
+        w_uc_px_x, w_uc_px_y = (w_nx - 1, w_ny - 1) if dup else (w_nx, w_ny)
+        w_desc = (f"WIEN2k UC px: {w_uc_px_x}×{w_uc_px_y}"
+                  + (" (duplicated last row/column dropped)" if dup else ""))
 
-    print(f"  WIEN2k: {len(wien_files)} layers, TIFF shape={sample.shape}, "
-          f"WIEN2k UC px: {w_uc_px_x}×{w_uc_px_y}")
+    print(f"  WIEN2k: {len(wien_files)} layers, TIFF shape={sample.shape}, {w_desc}")
 
     wien_layers = []
     for f in wien_files:
-        raw = read_ixchel_tiff(f)
-        uc  = raw[:w_uc_px_y, :w_uc_px_x]   # crop 1 UC
-        # Bring to ixchel UC resolution
-        if uc.shape != uc_shape:
-            uc = zoom(uc, (uc_shape[0] / uc.shape[0], uc_shape[1] / uc.shape[1]), order=3)
-        wien_layers.append(uc)
+        raw = read_ixchel_tiff(f).astype(np.float64)
+        if not supercell:
+            if has_duplicate_edges(raw):
+                raw = raw[:-1, :-1]
+            # one UC -> ixchel supercell grid (exact Fourier interpolation)
+            raw, _ = tile_fourier(raw, (ncx, ncy), (dimx, dimy))
+        wien_layers.append(extract_unit_cell(raw, (ncx, ncy), (uc_px_x, uc_px_y)))
 
     # ── Read ixchel TIFFs ────────────────────────────────────────────────────
     ixchel_files = sorted(ixchel_dir.glob("atompot*.tif"))
@@ -228,13 +263,14 @@ def compare_direction(direction):
         print(f"  MISSING: {ixchel_dir}/atompot*.tif")
         return None
 
-    print(f"  ixchel: {len(ixchel_files)} layers, UC crop: [{uc_px_y},{uc_px_x}]")
+    print(f"  ixchel: {len(ixchel_files)} layers, UC extraction: [{uc_px_y},{uc_px_x}]")
 
     ixchel_layers = []
     for f in ixchel_files:
         raw = read_ixchel_tiff(f)
-        uc  = raw[:uc_px_y, :uc_px_x]
-        ixchel_layers.append(uc)
+        if raw.shape != (dimy, dimx):
+            print(f"  WARNING: {f} has shape {raw.shape}, cfg dim is [{dimy},{dimx}]")
+        ixchel_layers.append(extract_unit_cell(raw, (ncx, ncy), (uc_px_x, uc_px_y)))
 
     n_wien  = len(wien_layers)
     n_ix    = len(ixchel_layers)
@@ -293,7 +329,9 @@ POT_UNIT = r"$V_z$ [1/Å]"
 def make_extent(shape, size_uc):
     if size_uc is None:
         return None
-    return [0, size_uc[0], 0, size_uc[1]]
+    # pixel centres at x_i = i*a/n (as sampled by extract_unit_cell)
+    hx, hy = 0.5 * size_uc[0] / shape[1], 0.5 * size_uc[1] / shape[0]
+    return [-hx, size_uc[0] - hx, -hy, size_uc[1] - hy]
 
 
 def plot_results(all_results, prefix):
@@ -336,8 +374,8 @@ def plot_results(all_results, prefix):
 
             if has_phys:
                 ax_A, ay_A = size_uc
-                x_line = np.linspace(0, ax_A, nx)
-                y_cut  = (peak_row + 0.5) * ay_A / ny
+                x_line = np.arange(nx) * ax_A / nx
+                y_cut  = peak_row * ay_A / ny
                 cut_str = f"Cut at {v_label} = {y_cut:.2f} Å"
             else:
                 x_line  = np.arange(nx)
