@@ -5,20 +5,23 @@ Reference: S. Kurasch, J. C. Meyer, D. Künzel, A. Groß, U. Kaiser,
 Beilstein J. Nanotechnol. **2**, 394–404 (2011), doi:[10.3762/bjnano.2.45](https://doi.org/10.3762/bjnano.2.45)
 (open access, CC-BY 2.0; the PDF is not part of this repository).
 
-Reviewed: 2026-09-11, script version `vcoul2tiff_ulm4.py` (8 Jun 2026), now
-`src/vcoul2tiff_ulm.py`. Test system: graphene, `~/wien2k_tests/Graphene`
-(CXY cell 2.461 × 4.264 × 15.0 Å, C at (0, 1/6, 0)), WIEN2k 24.1.
+First review 2026-09-11 (script version `vcoul2tiff_ulm4.py` of 8 Jun 2026),
+revised the same day after an independent multi-agent code review and
+re-validation. Test system: graphene, `~/wien2k_tests/Graphene` (CXY cell
+2.461 × 4.264 × 15.0 Å, C listed at (0, 1/6, 0) and (0, 5/6, 0), centring
+copies at (1/2, 2/3, 0) and (1/2, 1/3, 0)), WIEN2k 24.1.
 
 ## 0. What the paper actually provides
 
 * The text on p. 397 and p. 399 (quoted below) is the **only** description of
   the cutoff. Supporting Information File 2 (the modified `wien2venus.py`,
-  `…/2190-4286-2-45-S2.txt`) contains **no cutoff code** — it only drives
+  `…/2190-4286-2-45-S2.txt`) contains **no cutoff code**. It only drives
   `lapw5c` slice by slice (`RHO` / `ATU VAL NODEBUG` / `NONORTHO`) and adds
   the origin-shift and sub-volume options mentioned on p. 397. The cutoff and
   the projection were done elsewhere and are not published.
-* Fig. 2 was made with a single C atom in a 10 Å³ cell, 250 ppÅ line scan.
-  Fig. 3 was made from the same single-atom potential.
+* Fig. 2 was made with a single C atom in a 10 Å × 10 Å × 10 Å cell and a
+  250 ppÅ line scan (p. 397). The paper does not say which potential Fig. 3
+  was computed from.
 
 ## 1. Cutoff semantics
 
@@ -33,41 +36,39 @@ Paper p. 397:
 p. 399: "… projected along the *z*-direction using a cutoff of −50 kV".
 Fig. 3 legend: "nn cutoff 50000".
 
-* **Replacement, not clamping** — the old code did this correctly
-  (`np.where(bad, nb_max, data)`; the threshold value never enters the data).
-* **Threshold sign.** WIEN2k `case.vcoul` is the Coulomb potential *energy of
-  an electron* in Ry: negative at the nuclei (−1.6 MV at the on-grid nucleus,
-  see §6), +2.31 V in the vacuum of the graphene cell. The paper quotes
-  "−50 kV", i.e. WIEN2k sign, while plotting the positive scattering potential
-  V_s = −V_C in Figs. 2 and 3. "Higher than the cutoff" therefore has to be
-  read as *larger in magnitude*: flagged ⇔ V_C < −50 kV. The old code did this
-  (`data < -cutoff_ry`). ✓
-* **Replacement value — deviation found.** Read consistently in the paper's
-  positive convention, "the highest value in the neighboring pixels" is the
-  neighbour with the largest V_s, i.e. the *most negative* V_C: the neighbour
-  closest to the nucleus. The old code applied `maximum_filter` to
-  WIEN2k-sign data, which picks the *least* negative neighbour (smallest |V|),
-  i.e. the opposite reading — it carves a dip into the potential at the nucleus
-  instead of a plateau. Fixed: `--nn-value highest` (default, `minimum_filter`
-  on the valid neighbours) implements the paper; `--nn-value lowest` keeps the
-  old behaviour for comparison.
-* Numerically the two readings coincide for a nucleus exactly on a grid point
-  of an isotropic grid (all six face neighbours are equal by symmetry: 446 vs
-  444 V·Å in §6). They differ for off-grid nuclei, anisotropic voxels and
+* **Replacement, not clamping.** The original code already did this
+  (`np.where(bad, nb_max, data)`); the threshold value never enters the data.
+* **Threshold sign.** WIEN2k `case.vcoul` holds the Coulomb potential *energy
+  of an electron* in Ry: −1.6 MV at a nucleus that sits on a voxel (§6) and
+  +2.31 V in the vacuum of the graphene cell. The paper quotes "−50 kV", i.e.
+  in WIEN2k sign, while Figs. 2 and 3 plot the positive scattering potential
+  V_s = −V_C. "Higher than the cutoff" therefore means *larger in magnitude*:
+  a voxel is flagged if V_C < −50 kV. The original code did this.
+* **Replacement value (deviation, fixed).** In the paper's positive
+  convention, "the highest value in the neighboring pixels" is the neighbour
+  with the largest V_s, i.e. the *most negative* V_C, which is the neighbour
+  closest to the nucleus. The original code applied `maximum_filter` to
+  WIEN2k-sign data and so picked the *least* negative neighbour. Fixed:
+  `--nn-value highest` (default) implements the paper, `--nn-value lowest`
+  keeps the old reading.
+* For a nucleus on a voxel of the nearly isotropic 30 ppÅ grid the face
+  neighbours are almost, but not exactly, equal (grid spacings 33.3/33.8/33.3
+  mÅ), so the two readings give nearly the same central pixel (446 vs
+  444 V·Å). They differ more for off-grid nuclei, anisotropic voxels and
   clusters of flagged voxels.
 
 ## 2. Neighbourhood
 
-The paper never specifies the stencil ("neighboring pixels", legend "nn").
-Decision: default to the **6 face neighbours** — the literal nearest
-neighbours on the grid. With the paper's reading of "highest" the 20
-edge/corner voxels of a 3×3×3 cube practically never win because they are
-farther from the nucleus, so the choice hardly matters for the default. It
-does matter for the old reading: with `--nn-value lowest` the 26-stencil
-picks a corner voxel at √3 × 33 mÅ and lowers the central pixel by a further
-8 % (410 vs 444 V·Å). `--stencil 26` is available. Boundaries are periodic
-(`mode='wrap'`), which is correct for a periodic cell (the duplicate XSF end
-plane is harmless here). Documented in the `apply_nn_cutoff()` docstring.
+The paper does not specify the stencil ("neighboring pixels", legend "nn").
+The default is the **6 face neighbours**, the literal nearest neighbours on
+the grid. With the paper's reading of "highest", the 20 edge and corner
+voxels of a 3×3×3 cube rarely win because they are farther from the nucleus.
+With `--nn-value lowest`, the 26-stencil picks a corner voxel and lowers the
+central pixel by a further 8 % (410 vs 444 V·Å). `--stencil 26` is available.
+When a flagged voxel has no valid neighbour at all (a cluster), only that voxel
+searches a wider cube. The cutoff runs on the periodic grid after the
+duplicated XSF end planes have been removed (§3), so `mode='wrap'` reaches the
+true periodic neighbour.
 
 ## 3. Sampling rate and layer boundaries
 
@@ -77,110 +78,130 @@ higher rate in the perpendicular direction. … The blue boxes in Figure 3
 indicate the mean value within one pixel at a resolution of 30 ppÅ".
 p. 399: "The 3D potentials were sliced with a resolution of 30 ppÅ".
 
-* The finer perpendicular rate is the *analysis* grid used for the green
-  curve of Fig. 3 only; the production potentials were 30 ppÅ isotropic. The
-  handover's statement that the paper "uses … a much finer rate perpendicular"
-  applies to Fig. 3, not to the images.
-* The script takes whatever grid `3ddens` wrote. The existing graphene export
-  (`74 128 450` in `case.in3d`) is a 30 ppÅ grid **if** the XSF is read as a
-  general grid with n−1 intervals (73/2.461 = 29.7 ppÅ etc.); the file indeed
-  has identical first and last planes along all three axes. `ulm4` handles
-  this (voxel size L/(n−1), duplicate plane dropped) — the earlier
-  `vcoul2tiff_ulm.py` (18 May) did not, and also reshaped in C order,
-  scrambling the voxels. Both were confirmed on the data
-  (roughness F = 0.05 vs C = 0.29).
-* Layer boundaries: `z0`, `cz` from the cfg are mapped to voxel planes with
-  `round(z/L·(n−1))`; for the single 15 Å graphene layer this gives planes
-  0…449, i.e. all 450 unique planes exactly once. ✓ Note that a cfg whose
-  layer boundaries are not multiples of the voxel size is rounded to the
-  nearest plane (no sub-voxel splitting) — inherent to the method.
+* The higher perpendicular rate belongs to the analysis behind Fig. 3 (the
+  green curve); the production potentials were sliced at 30 ppÅ.
+* 3ddens writes an XSF *general grid*: n points span each axis including both
+  ends, and the last plane repeats the first. The script now removes the
+  duplicated plane on **all three axes** right after reading. Voxel size is
+  L/(n−1), and each TIFF holds exactly one period. The original script removed
+  it only along the beam, so the TIFFs repeated their first row and column.
+  The even older `vcoul2tiff_ulm.py` (18 May) also reshaped the data in C
+  order, which scrambles the voxels (roughness F = 0.05 vs C = 0.29 on the
+  graphene file).
+* The existing graphene export `74 128 450` has 73 × 127 × 449 unique points,
+  i.e. 29.7 × 29.8 × 29.9 ppÅ, and the 15 Å layer sums all 449 planes. For
+  `75 127 451` all 450 planes are summed.
+* When nx = nz, the F and C reshapes are exact transposes and cannot be told
+  apart from the data. The script then assumes the standard order F and says
+  so (`--order` overrides).
+* Layer boundaries from the cfg are rounded to whole voxel planes; there is no
+  sub-voxel splitting, which is inherent to the method.
 
-## 4. Normalisation — deviation found
+## 4. Normalisation (deviation, fixed)
 
 p. 397: "Far from the core, the WIEN2k potential approaches a non-zero constant
 value. In order to obtain the usual normalization, the potential was shifted
 (i.e., smallest value was set to zero)." p. 399: "sliced, normalized and
 projected".
 
-The old code did not shift. In the graphene cell the vacuum level of
+The original code did not shift. In the graphene cell the vacuum level of
 `vcoul` is +2.314 V (WIEN2k sign), so V_s = −V_C is −2.31 V in vacuum and the
-projected 15 Å layer carries a constant −34.7 V·Å = −0.72 Å⁻¹ everywhere
-(the old TIFF's minimum is −0.584 Å⁻¹). For the multislice intensity a
-constant per-slice offset is only a global phase, but every comparison with
-IAM/ixchel potentials (which vanish in vacuum), every ⟨ΔV⟩ and every peak
-ratio is biased by it. Fixed: the script now subtracts max(V_C) after the
-cutoff (`min(V_s) = 0`, exactly the paper's rule); `--no-normalize` restores
-the old behaviour. For bulk crystals without vacuum the "smallest value" is
-the interstitial minimum, which is *not* the vacuum zero of the IAM — a
-known limitation of the paper's rule, not of the script.
+projected 15 Å layer carries a constant −34.7 V·Å = −0.72 1/Å (the old TIFF
+minimum was −0.584 1/Å). For the multislice intensity a constant per-slice
+offset is only a global phase, but any comparison with IAM potentials, which
+vanish in vacuum, is biased by it. Fixed: after the cutoff the script
+subtracts max(V_C), so min(V_s) = 0 as in the paper; `--no-normalize`
+restores the old behaviour. For bulk crystals without vacuum the "smallest
+value" is the interstitial minimum, not the vacuum zero of the IAM; this is a
+limitation of the paper's rule, not of the script.
 
 ## 5. Units
 
 * h²/(2π mₑ e) = (6.62607015e-34)² / (2π · 9.1093837e-31 · 1.602176634e-19)
-  = 4.788e-19 V·m² = **47.88 V·Å²**. ✓ Kirkland's projected potential in V·Å
-  divided by this is the dimensionless-per-length quantity ixchel stores
-  (1/Å), consistent with `kirkland_layer_fp()` in `vcoul2tiff.py`.
-* XSF route: `to_kirk = d_proj[Å] · 13.6057[V/Ry] / 47.88` per summed voxel. ✓
-  Native route (`vcoul2tiff.py`): `RY_TO_EV · BOHR / H2_2PI_ME` = 0.1504 per
-  Ry·Bohr. ✓ Both checked by re-derivation; the script now also prints V·Å.
-* Label inconsistency in `compare_all_subsliced.py` fixed: the data are in
-  1/Å (ixchel TIFFs), so every label and the printed ⟨DFT−IAM⟩ now say 1/Å.
+  = 4.788e-19 V·m² = **47.88 V·Å²**. The Kirkland projected potential in V·Å
+  divided by this is what ixchel stores (1/Å); ixchel builds the transmission
+  function as exp(i λ(1 + E/511 keV) V_z), which `check_transmission.py`
+  confirms to 3.5e-8 rad.
+* XSF route: `to_kirk = d[Å] · 13.6057 [V/Ry] / 47.88` per summed voxel.
+* All labels in `compare_all_subsliced.py` now say 1/Å.
 
-## 6. Sanity target — reproduction of Fig. 3 on graphene
+## 6. Sanity target: reproduction of Fig. 3 on graphene
 
-`lapw5` x–z plane through a C nucleus (x: ±0.117 Å at 600 ppÅ, z: full 15 Å
-at 30 ppÅ; input `lapw5_fig3/Graphene.in5_fig3`), plus a `3ddens` export on a
-75 × 127 × 451 grid chosen so that the nucleus at y = 1/6 sits **exactly on a
-voxel** (126/6 = 21). Script: `src/plot_kurasch_fig3.py`, figure:
-`reference/kurasch_fig3_graphene.png`.
+Inputs: a `lapw5` x–z plane through a C nucleus (x at 600 ppÅ over ±0.117 Å,
+z over the full 15 Å at 30 ppÅ; `reference/lapw5_fig3/`) and 3D grids of
+75 × 127 × 451 points, chosen so that **all four** nuclei of the cell sit
+exactly on voxels (126/6 = 21, 74/2 = 37). Script: `src/plot_kurasch_fig3.py`;
+figure: `reference/kurasch_fig3_graphene.png`.
 
 | quantity (central 30 ppÅ pixel, 15 Å column) | V·Å | 1/Å |
 |---|---|---|
-| WIEN2k voxel at the nucleus (r = r₀ = 1e-4 Bohr) | 1.632 MV | |
+| WIEN2k voxel at the nucleus (r = r₀ = 1e-4 bohr) | 1.632 MV | |
 | no cutoff (paper Fig. 3 green peak ≈ 50 000) | **54 781** | 1144 |
-| nn cutoff, paper reading (highest / 6 neighbours), normalised | **446** | 9.31 |
-| nn cutoff, old reading (lowest / 6) | 444 | 9.28 |
-| nn cutoff, old reading (lowest / 26) | 410 | 8.56 |
-| old code exactly (lowest / 26 / no shift) | 375 | 7.83 |
-| "ideal": 2-D area mean of the 600 ppÅ curve over the pixel | **642** | 13.4 |
-| Kirkland IAM (C), same area mean | 566 | 11.8 |
-| ratio ideal / cutoff (paper: "within a factor of three") | **1.44** | |
-| ratio no-cutoff / ideal (paper: "up to two orders of magnitude") | **85** | |
+| nn cutoff, paper reading (highest, 6 neighbours), normalised | **446** | 9.31 |
+| nn cutoff, old reading (lowest, 6) | 444 | 9.28 |
+| nn cutoff, old reading (lowest, 26) | 410 | 8.56 |
+| "ideal": true mean of V_z over the pixel column (fine z integration of the spherical part inside the sphere) | **563** | 11.8 |
+| paper-style ideal: 2-D pixel mean of the green curve (30 ppÅ z sampling) | 642 | 13.4 |
+| Kirkland IAM (C), same pixel mean | 566 | 11.8 |
+| ratio ideal / cutoff (paper: "within a factor of three") | **1.26** (paper-style 1.44) | |
+| ratio no cutoff / ideal (paper: "up to two orders of magnitude") | **97** (paper-style 85) | |
 
-The reproduction matches the paper's numbers (50 000 V·Å peak, factor < 3
-after the cutoff, ~2 orders without) and confirms the mechanism: the cutoff
-only ever touches the one voxel that sits on the nucleus (plus its 7 periodic
-images on the grid faces).
+The reproduction matches the paper: a peak of about 50 000 V·Å, within a
+factor of three after the cutoff, about two orders of magnitude without it.
+Near the core the true pixel mean agrees with the Kirkland value to 0.5 %.
 
-**Consequence for the existing data.** On the grid actually used so far
-(`74 128 450`) the nucleus is 5.6 mÅ off the nearest voxel in y; that voxel is
-−15 kV, far above the −50 kV threshold, so **the cutoff is a no-op** and the
-central pixel comes out at 871 V·Å (≈ 1.4 × the ideal) — the overshoot is
-smaller than in the on-grid case but is not treated at all. The paper's
-threshold is tuned to the on-grid singularity; whether a nucleus lands on a
-voxel depends on the atom position and `in3d` grid, which should be checked
-per material (the script prints the most negative voxel).
+**3ddens and centred lattices.** WIEN2k 24.1 `3ddens` adds the centring
+translations only for F, B, CXZ and R lattices (`SRC_3ddens/3ddens.F:403`).
+In every graphene (CXY) XSF written by 3ddens, the atoms at (1/2, 1/3, 0) and
+(1/2, 2/3, 0) therefore have no sphere contribution, only the smooth
+plane-wave value (−206 V instead of −3.9 kV near the nucleus).
+`src/lapw5grid.py` writes the same XSF with lapw5, which handles the centring;
+it agrees with 3ddens to 1e-8 V everywhere else and to 1e-9 Ry on rutile (P).
 
-## 7. Patch summary (`src/vcoul2tiff_ulm.py`)
+| grid (flagged voxels) | XSF from | listed C (0, 1/6) | centring C (1/2, 1/3) |
+|---|---|---|---|
+| 75 × 127 × 451 (nuclei on voxels) | 3ddens (2 flagged) | 446 V·Å | 142 V·Å |
+| 75 × 127 × 451 (nuclei on voxels) | lapw5grid (4 flagged) | 446 V·Å | 446 V·Å |
+| 74 × 128 × 450 (existing export; no voxel on a nucleus, 0 flagged) | 3ddens | 871 V·Å (nearest voxel 5.6 mÅ away) | 141 V·Å |
+| 74 × 128 × 450 | lapw5grid | 871 V·Å | 471 V·Å (nearest voxel 11.2 mÅ away) |
 
-1. `apply_nn_cutoff()`: replacement value = neighbour with the highest V_s
-   (`minimum_filter` on WIEN2k-sign data); 6-face stencil by default;
-   options `--nn-value`, `--stencil`; cluster handling unchanged.
+On the existing grid the −50 kV cutoff never triggers, and the central pixel
+depends strongly on how far the nearest voxel is from the nucleus
+(1.55 × or 0.84 × the ideal 563 V·Å here). The paper's threshold is tuned to
+a nucleus on a voxel; check this per material (the script prints the number
+of flagged voxels).
+
+## 7. Summary of changes to `src/vcoul2tiff_ulm.py`
+
+1. `apply_nn_cutoff()`: replacement value = neighbour with the highest V_s;
+   6-face stencil by default (`--nn-value`, `--stencil`); only voxels without
+   any valid stencil neighbour use the widened cube.
 2. Paper normalisation (subtract max V_C so that min V_s = 0); `--no-normalize`.
-3. Output also reported in V·Å; comments/docstrings in English; otherwise the
-   XSF reader, cfg parser, projection and TIFF writer of `ulm4` are unchanged.
+3. Duplicated XSF end planes removed on all axes before cutoff, normalisation
+   and projection.
+4. Data order: standard F assumed when the roughness test cannot decide
+   (nx = nz).
+5. `--cutoff` is a magnitude (−50000 and 50000 are equivalent); the log counts
+   only voxels that were actually replaced.
+6. The [010] in-plane frame is x = +a, y = +c, which is left-handed; crystruct
+   accepts both handednesses, so the matching triplet is documented in the
+   docstring rather than changed.
 
 ## 8. How to regenerate the Fig. 3 check
 
 ```bash
 cd ~/wien2k_tests/Graphene
-# 1. high-resolution x-z plane through the nucleus (1.7 s)
-cp <repo>/reference/lapw5_fig3/Graphene.in5_fig3 <repo>/reference/lapw5_fig3/lapw5_fig3.def .
-lapw5 lapw5_fig3.def                       # writes Graphene.rho_fig3 (Ry)
-# 2. optional: 3D grid with the nucleus on a voxel (75 127 451 in case.in3d_ongrid)
-$WIENROOT/3ddens 3ddens_vcoul_ongrid.def   # writes Graphene_vcoul_ongrid.xsf
+cp <repo>/reference/lapw5_fig3/* .        # Graphene.in5_fig3, lapw5_fig3.def,
+                                          # Graphene.in3d_ongrid, 3ddens_vcoul_ongrid.def
+# 1. high-resolution x-z plane through the nucleus (about 2 s)
+lapw5 lapw5_fig3.def                      # writes Graphene.rho_fig3 (Ry)
+# 2. 3D grid with all nuclei on voxels (lapw5grid handles the CXY centring)
+$PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul \
+    --grid 75 127 451 -o Graphene_vcoul_ongrid.xsf
+#    (3ddens 3ddens_vcoul_ongrid.def writes the same grid but misses the
+#     sphere contributions of the centring atoms)
 # 3. analysis and figure
-python3 <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
-python3 <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_ongrid.xsf \
-        --cfg Graphene_ixchel_001.cfg -o ulm_ongrid
+$PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
+$PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_ongrid.xsf \
+    --cfg Graphene_ixchel_001.cfg -o ulm_ongrid
 ```
