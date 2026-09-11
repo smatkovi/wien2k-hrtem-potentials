@@ -1,642 +1,329 @@
 #!/usr/bin/env python3
 """
-vcoul2tiff.py — Analytical projection of WIEN2k vcoul → ixchel TIF
-
-Reads case.vcoul_DFT and case.vcoul_IAM in the native WIEN2k format and
-generates projected potentials as ixchel-compatible TIFF files.
+vcoul2tiff.py — WIEN2k Coulomb potentials (DFT − IAM via lapw5) → ixchel TIFFs
 
 METHOD:
-  V_proj = V_Kirkland + ΔV_proj
-  where ΔV = vcoul_DFT − vcoul_IAM is projected analytically:
-    - Interstitial: selection of the plane waves with G·ê_beam = 0
-    - Muffin-Tin:   Abel transform of the (l,m) channels on the radial grid
+  V_z = V_z^Kirkland + ΔV_z
+  ΔV_s(r) = −[V_C^DFT(r) − V_C^IAM(r)]
+      case.vcoul holds the Coulomb potential energy of an electron, V_C [Ry]
+      (negative at the nuclei); the scattering potential is V_s = −V_C.
+  ΔV_C is evaluated by lapw5 ('RHO SUB' of case.vcoul_DFT and case.vcoul_IAM,
+  see lapw5grid.py).  lapw5 applies WIEN2k's own star expansion, local rotation
+  matrices, symmetry operations and lattice centring, and it subtracts the two
+  files before evaluating them, so the −2Z/r nuclear terms cancel exactly and
+  ΔV is finite everywhere (no cutoff).
+  ΔV_z(x, y) = ∫ ΔV_s dz over the layer's depth window, trapezoid rule on a
+  regular grid (--dz), converted to Kirkland units: V·Å / 47.88 V·Å².
+  V_z^Kirkland is ixchel's atompot algorithm (kirkland_layer from
+  xsf2tiff_dwFactor.py: B-factors, subslicing, band limit), which reproduces
+  `ixchel atompot` to float precision.
 
-No 3ddens grid, no separate Poisson solver, no nuclear singularity.
+GEOMETRY:
+  The TIFF frame (x, y, beam) is spanned by the crystal directions v1, v2, v3
+  of the conventional cell: either the crystruct triplet the cfg was made with
+  (--frame) or v3 = --miller with v1, v2 from xsf2tiff_dwFactor.inplane_vectors.
+  The cfg layer sizes must equal |v1| and |v2|.  The cfg atoms are matched to
+  the struct atoms (including the centring copies) to find the origin of the
+  cfg frame; the run stops if no offset makes them coincide.
+  Depth window per layer (dv_window): centred on the layer's atomic plane,
+  half way to its neighbours (classical projection) or the layer slab
+  [z0, z0+cz) (subslicing), as in xsf2tiff_dwFactor.py.
+  Pixel (i, j) sits at (i·ax/nx, j·by/ny), as in ixchel atompot.
+
+CONVERGENCE (graphene, 15 Å cell): dz = 67 mÅ changes ΔV_z by < 1.3e-5 1/Å
+  against dz = 2 mÅ; 25 mÅ lateral sampling leaves < 1e-5 1/Å aliasing.
+
+OUTPUT:
+  One unit cell per layer, <outdir>/<cfg filename>, float32 in 1/Å, rows = y.
+  Put the layers on the ixchel `dim` grid with tiff2ixchel.py before running
+  `ixchel main`.
+
+POTENTIAL ZERO:
+  lapw0 fixes the zero of each potential by its own convention, so V_C^DFT and
+  V_C^IAM have different vacuum levels (graphene: 2.314 V vs 2.814 V) and ΔV
+  carries a constant offset.  For image simulation that is a global phase.
+  For slab geometries with vacuum, --vacuum-depth D shifts ΔV_s so that its
+  mean on the plane at cfg depth D is zero (both potentials referenced to the
+  vacuum, as the Kirkland term is); the lateral spread on that plane is
+  printed and must be small.  A sloped vacuum means a non-neutral starting
+  density: regenerate case.vcoul_IAM and check ':NEC01' in case.outputd.
+  Without --vacuum-depth, mean values (⟨DFT − IAM⟩, mean inner potential) are
+  not meaningful.
 
 Usage:
     python3 vcoul2tiff.py \\
         --vcoul-dft Graphene.vcoul_DFT --vcoul-iam Graphene.vcoul_IAM \\
-        --struct Graphene.struct --fparams fparams.dat \\
-        --cfg Graphene_ixchel_001.cfg --miller 0 0 1 \\
-        -o wien2k_analytical_001
+        --struct Graphene.struct --cfg Graphene_ixchel_001.cfg \\
+        [--miller 0 0 1 | --frame 1 0 0  0 1 0  0 0 1] [--dz 0.05] [--dx 0.025] \\
+        [--vacuum-depth 7.5] -o wien2k_001
+
+Dependencies: numpy, scipy, tifffile, pylibconfig2; lapw5 on PATH ($WIENROOT)
 """
 
-import argparse, re, sys, math
+import argparse
+import math
+import re
+import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.interpolate import interp1d
-from scipy.special import lpmv
-import tifffile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lapw5grid as l5                    # noqa: E402
+import xsf2tiff_dwFactor as xsf           # noqa: E402
+
+RY_TO_V   = 13.605693122994   # 1 Ry of electron energy ↔ 13.606 V of potential
+H2_2PI_ME = 47.88             # h²/(2π m_e e) [V·Å²], Kirkland/ixchel unit
 
 
 # ═══════════════════════════════════════════════════════════════
-# Constants
+# Geometry
 # ═══════════════════════════════════════════════════════════════
 
-BOHR      = 0.529177210903
-BOHR3     = BOHR**3
-RY_TO_EV  = 13.605693122994
-H2_2PI_ME = 47.88
-
-IXCHEL_MASS = {
-     1:  1.00794,    2:  4.002602,   3:  6.941,       4:  9.012182,
-     5: 10.811,      6: 12.0107,     7: 14.0067,      8: 15.9994,
-     9: 18.9984032, 10: 20.1791,    11: 22.98976928, 12: 24.305,
-    13: 26.9815386, 14: 28.0855,    15: 30.973762,   16: 32.065,
-    17: 35.453,     18: 39.948,     19: 39.0983,     20: 40.078,
-    21: 44.955912,  22: 47.867,     23: 50.9415,     24: 51.9961,
-    25: 54.938045,  26: 55.845,     27: 58.933195,   28: 58.6934,
-    29: 63.546,     30: 65.38,      31: 69.723,      32: 72.63,
-    33: 74.9216,    34: 78.96,      35: 79.904,      36: 83.798,
-    37: 85.4678,    38: 87.62,      39: 88.90585,    40: 91.224,
-    41: 92.90638,   42: 95.96,      43: 98.0,        44: 101.07,
-    45: 102.9055,   46: 106.42,     47: 107.8682,    48: 112.411,
-    49: 114.818,    50: 118.71,     51: 121.76,      52: 127.6,
-    53: 126.90447,  54: 131.293,    55: 132.9054519, 56: 137.327,
-    57: 138.90547,  58: 140.116,    59: 140.90765,   60: 144.242,
-    61: 145.0,      62: 150.36,     63: 151.964,     64: 157.25,
-    65: 158.92535,  66: 162.5,      67: 164.93032,   68: 167.259,
-    69: 168.93421,  70: 173.054,    71: 174.9668,    72: 178.49,
-    73: 180.94788,  74: 183.84,     75: 186.207,     76: 190.23,
-    77: 192.217,    78: 195.084,    79: 196.966569,  80: 200.59,
-    81: 204.3833,   82: 207.2,      83: 208.9804,    84: 209.0,
-    85: 210.0,      86: 222.0,      87: 223.0,       88: 226.0,
-    89: 227.0,      90: 232.03806,  91: 231.03586,   92: 238.02891,
-    93: 237.0,      94: 244.0,      95: 243.0,       96: 247.0,
-}
-M_SI = IXCHEL_MASS[14]
-
-def ixchel_B(Z):
-    M = IXCHEL_MASS.get(Z, M_SI)
-    return 0.45 * M_SI / M
-
-
-# ═══════════════════════════════════════════════════════════════
-# I/O: vcoul, struct, fparams, cfg
-# ═══════════════════════════════════════════════════════════════
-
-def parse_vcoul(filename):
-    """Reads case.vcoul in the native WIEN2k format."""
-    with open(filename) as f:
-        lines = f.readlines()
+def struct_atoms_cart(struct, conv):
+    """All atoms of the conventional cell (listed positions × centring) as
+    (Z, Cartesian position [Å])."""
     atoms = []
-    pw_data = None
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if 'ATOMNUMBER' in line:
-            m = re.search(r'ATOMNUMBER\s*=\s*(\d+)', line)
-            atom_idx = int(m.group(1))
-            i += 1
-            m = re.search(r'NUMBER OF LM\s*(\d+)', lines[i].strip())
-            n_lm = int(m.group(1))
-            i += 1
-            lm_channels = []
-            for _ in range(n_lm):
-                while i < len(lines):
-                    if 'FOR L' in lines[i]: break
-                    i += 1
-                m = re.search(r'L\s+(-?\d+)\s+M=\s*(-?\d+)', lines[i])
-                l_val, m_val = int(m.group(1)), int(m.group(2))
-                i += 1
-                while i < len(lines) and lines[i].strip() == '':
-                    i += 1
-                vals = []
-                while i < len(lines) and len(vals) < 10000:
-                    raw = lines[i]
-                    if raw.strip() == '' or 'VLM' in raw or 'CLM' in raw or \
-                       'ATOM' in raw or 'COULOMB' in raw or 'MIXED' in raw:
-                        break
-                    pos = 3
-                    while pos < len(raw) - 1:
-                        chunk = raw[pos:pos+19]
-                        if chunk.strip():
-                            vals.append(float(chunk.replace('D', 'E')))
-                        pos += 19
-                    i += 1
-                lm_channels.append({'l': l_val, 'm': m_val, 'data': np.array(vals)})
-            atoms.append({'atom_idx': atom_idx, 'n_lm': n_lm, 'lm_channels': lm_channels})
-            continue
-        if 'NUMBER OF PW' in line:
-            m = re.search(r'(\d+)\s*NUMBER OF PW', line)
-            n_pw = int(m.group(1))
-            i += 1
-            G_list, coeff_list = [], []
-            for _ in range(n_pw):
-                while i < len(lines) and lines[i].strip() == '':
-                    i += 1
-                raw = lines[i]
-                ga = int(raw[0:8]); gb = int(raw[8:13]); gc = int(raw[13:18])
-                re_v = float(raw[18:37].replace('D', 'E'))
-                im_v = float(raw[37:56].replace('D', 'E'))
-                G_list.append([ga, gb, gc])
-                coeff_list.append(complex(re_v, im_v))
-                i += 1
-            pw_data = {'n_pw': n_pw, 'G': np.array(G_list, dtype=int),
-                       'coeff': np.array(coeff_list, dtype=complex)}
-            continue
-        i += 1
-    return {'atoms': atoms, 'pw': pw_data}
+    for at in struct['atoms']:
+        for pos in at['positions']:
+            for t in l5.centring_translations(struct['lattice']):
+                f = (np.array(pos) + np.array(t)) % 1.0
+                atoms.append((int(round(at['Z'])), f @ conv))
+    return atoms
 
 
-def read_struct(filename):
-    """Reads case.struct: lattice parameters and atoms."""
-    with open(filename) as f:
-        lines = f.readlines()
-    lattice_type = lines[1][:3].strip()
-    parts = lines[3].split()
-    a, b, c = float(parts[0]), float(parts[1]), float(parts[2])
-    atoms = []
-    i = 4
-    while i < len(lines):
-        if lines[i].startswith('ATOM'):
-            m = re.search(r'X=\s*([\d.]+)\s*Y=\s*([\d.]+)\s*Z=\s*([\d.]+)', lines[i])
-            x0, y0, z0 = float(m.group(1)), float(m.group(2)), float(m.group(3))
-            m2 = re.search(r'MULT=\s*(\d+)', lines[i+1])
-            mult = int(m2.group(1))
-            positions = [(x0, y0, z0)]
-            for k in range(1, mult):
-                m3 = re.search(r'X=\s*([\d.]+)\s*Y=\s*([\d.]+)\s*Z=\s*([\d.]+)',
-                              lines[i+1+k])
-                positions.append((float(m3.group(1)), float(m3.group(2)), float(m3.group(3))))
-            elem_line = lines[i + 1 + mult]
-            em = re.match(r'(\w+)', elem_line.strip())
-            npt_m = re.search(r'NPT=\s*(\d+)', elem_line)
-            r0_m  = re.search(r'R0=\s*([\d.]+)', elem_line)
-            rmt_m = re.search(r'RMT=\s*([\d.]+)', elem_line)
-            z_m   = re.search(r'Z:\s*([\d.]+)', elem_line)
-            atoms.append({
-                'element': em.group(1) if em else '??',
-                'positions': positions, 'mult': mult,
-                'NPT': int(npt_m.group(1)),
-                'R0': float(r0_m.group(1)),
-                'RMT': float(rmt_m.group(1)),
-                'Z': int(float(z_m.group(1))),
-            })
-            i += 2 + mult
-        else:
-            i += 1
-    return {'lattice_type': lattice_type, 'a': a, 'b': b, 'c': c, 'atoms': atoms}
-
-
-def read_fparams(filename):
-    """Reads Kirkland fparams.dat."""
-    params = {}
-    with open(filename) as f:
-        lines = f.readlines()
-    i = 0
-    while i < len(lines):
-        m = re.match(r'Z=\s*(\d+)', lines[i].strip())
-        if m and i + 3 < len(lines):
-            Z = int(m.group(1))
-            v = [float(x) for ln in lines[i+1:i+4] for x in ln.split()]
-            params[Z] = {'a': [v[0], v[2], v[4]], 'b': [v[1], v[3], v[5]],
-                         'c': [v[6], v[8], v[10]], 'd': [v[7], v[9], v[11]]}
-            i += 4
-        else:
-            i += 1
-    return params
-
-
-def parse_cfg(cfg_path):
-    """Reads ixchel crystruct.cfg (layer geometry)."""
-    text = Path(cfg_path).read_text()
-    sm  = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
-    seq = list(sm.group(1)) if sm else []
-
-    lm = re.search(r'layers\s*=\s*\{', text)
-    depth = 0; j = lm.end() - 1
-    while j < len(text):
-        if text[j] == '{': depth += 1
-        elif text[j] == '}':
-            depth -= 1
-            if depth == 0: break
-        j += 1
-    layers_text = text[lm.end():j]
-
-    layer_defs = {}
-    pos = 0
-    while pos < len(layers_text):
-        lbm = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
-        if not lbm: break
-        label = lbm.group(1)
-        bstart = pos + lbm.end() - 1
-        d = 0; p2 = bstart
-        while p2 < len(layers_text):
-            if layers_text[p2] == '{': d += 1
-            elif layers_text[p2] == '}':
-                d -= 1
-                if d == 0: break
-            p2 += 1
-        block = layers_text[bstart+1:p2]
-        su = re.search(
-            r'size_uc\s*=\s*\{[^}]*x\s*=\s*([0-9.E+\-]+)[^}]*'
-            r'y\s*=\s*([0-9.E+\-]+)[^}]*z\s*=\s*([0-9.E+\-]+)', block)
-        fn = re.search(r'filename\s*=\s*\"([^\"]+)\"', block).group(1)
-        atoms_list = []
-        asec_m = re.search(r'atoms\s*=\s*\(', block)
-        if asec_m:
-            ap0 = asec_m.end() - 1; d = 0; ae = ap0
-            while ae < len(block):
-                if block[ae] == '(': d += 1
-                elif block[ae] == ')':
-                    d -= 1
-                    if d == 0: break
-                ae += 1
-            asec = block[ap0+1:ae]
-            ap = 0
-            while ap < len(asec):
-                ob = asec.find('{', ap)
-                if ob < 0: break
-                d = 0; p3 = ob
-                while p3 < len(asec):
-                    if asec[p3] == '{': d += 1
-                    elif asec[p3] == '}':
-                        d -= 1
-                        if d == 0: break
-                    p3 += 1
-                atom_block = asec[ob+1:p3]
-                nm = re.search(r'(?<!file)\bname\s*=\s*\"([^\"]+)\"', atom_block)
-                zm = re.search(r'\bZ\s*=\s*(\d+)', atom_block)
-                pm = re.search(r'positions\s*=\s*\((.*?)\)', atom_block, re.DOTALL)
-                dw_m = re.search(r'\bDW\s*=\s*([0-9.E+\-]+)', atom_block)
-                if nm and zm and pm:
-                    Z_val = int(zm.group(1))
-                    B_val = float(dw_m.group(1)) if dw_m else ixchel_B(Z_val)
-                    for pp in re.finditer(
-                            r'\[\s*([0-9.E+\-]+)\s*,\s*([0-9.E+\-]+)\s*\]',
-                            pm.group(1)):
-                        atoms_list.append({
-                            'name': nm.group(1), 'Z': Z_val, 'B': B_val,
-                            'proj_x': float(pp.group(1)), 'proj_y': float(pp.group(2)),
-                        })
-                ap = p3 + 1
-        layer_defs[label] = {
-            'ax': float(su.group(1)), 'by': float(su.group(2)),
-            'cz': float(su.group(3)), 'filename': fn, 'atoms': atoms_list
-        }
-        pos = p2 + 1
-
-    layers = []
-    z0 = 0.0
-    for label in seq:
-        ld = layer_defs[label]
-        layers.append({
-            'label': label, 'ax': ld['ax'], 'by': ld['by'],
-            'cz': ld['cz'], 'z0': z0, 'filename': ld['filename'],
-            'atoms': ld['atoms'],
-        })
-        z0 += ld['cz']
-    return {'layers': layers, 'total_z': z0}
-
-
-# ═══════════════════════════════════════════════════════════════
-# Kirkland IAM (Fourier space)
-# ═══════════════════════════════════════════════════════════════
-
-def featom_k2(Z, k2, fp):
-    p = fp[Z]
-    res = np.zeros_like(k2, dtype=float)
-    for a_, b_ in zip(p['a'], p['b']):
-        res += a_ / (k2 + b_)
-    for c_, d_ in zip(p['c'], p['d']):
-        res += c_ * np.exp(-d_ * k2)
-    return res
-
-
-def kirkland_layer_fp(atoms_layer, ax, by, Nu, Nv, fp):
-    """Kirkland IAM in Fourier space [1/Å]."""
-    ixmid, iymid = Nu // 2, Nv // 2
-    kxv = np.array([i if i < ixmid else i - Nu for i in range(Nu)], float)
-    kyv = np.array([i if i < iymid else i - Nv for i in range(Nv)], float)
-    KX, KY = np.meshgrid(kxv, kyv, indexing='ij')
-    k2 = KX**2 / ax**2 + KY**2 / by**2
-    k2max = 1.0 / max(2*ax/Nu, 2*by/Nv)**2
-    mask = k2 <= k2max
-    scale = float(Nu * Nv) / (ax * by)
-    pix = np.zeros((Nu, Nv), dtype=complex)
-    for at in atoms_layer:
-        Z = at['Z']
-        if Z not in fp:
-            print(f"    WARNING: Z={Z} not in fparams — skipped")
-            continue
-        B = at['B']
-        fe = featom_k2(Z, k2, fp) * np.exp(-B * k2)
-        phase = np.exp(-2j * np.pi * (KX * at['proj_x'] + KY * at['proj_y']))
-        pix += mask * scale * fe * phase
-    return np.real(np.fft.ifft2(pix))
-
-
-# ═══════════════════════════════════════════════════════════════
-# Analytical ΔV projection
-# ═══════════════════════════════════════════════════════════════
-
-
-def primitive_vectors(struct):
-    """Primitive lattice vectors in Bohr (WIEN2k convention)."""
-    a_b, b_b, c_b = struct['a'], struct['b'], struct['c']
-    lt = struct['lattice_type']
-    if lt == 'P':
-        return np.array([[a_b, 0, 0], [0, b_b, 0], [0, 0, c_b]])
-    elif lt == 'F':
-        h2 = a_b / 2
-        return np.array([[h2, h2, 0], [h2, 0, h2], [0, h2, h2]])
-    elif lt in ('B', 'I'):
-        h2 = a_b / 2
-        return np.array([[-h2, h2, h2], [h2, -h2, h2], [h2, h2, -h2]])
-    elif lt in ('CXY', 'C'):
-        return np.array([[a_b/2, -b_b/2, 0], [a_b/2, b_b/2, 0], [0, 0, c_b]])
-    elif lt == 'CXZ':
-        return np.array([[a_b/2, 0, -c_b/2], [0, b_b, 0], [a_b/2, 0, c_b/2]])
-    elif lt == 'CYZ':
-        return np.array([[a_b, 0, 0], [0, b_b/2, -c_b/2], [0, b_b/2, c_b/2]])
-    raise NotImplementedError(f"Lattice type '{lt}' not implemented")
-
-
-def project_dV_layer(vcoul_dft, vcoul_iam, struct, miller,
-                     z0_ang, cz_ang, layer_atoms_frac_z, nx, ny):
+def frame_offset(atoms, cfg, conv, ex, ey, ez, period):
     """
-    Projects ΔV = vcoul_DFT − vcoul_IAM analytically for ONE layer.
-
-    Interstitial: ALL PW with partial z-integral
-      ∫_{z0}^{z0+cz} exp(iKz·z) dz = cz·sinc(Kz·cz/2)·exp(iKz·(z0+cz/2))
-
-    Muffin-Tin: only atoms whose z-position lies within the layer.
-
-    Parameters:
-        z0_ang, cz_ang: layer boundaries in Å
-        layer_atoms_frac_z: list of z-positions (fractional) of the atoms in this layer
+    Offset t = (t_u, t_v, t_d) [Å] of the cfg frame origin in struct
+    coordinates along (ex, ey, ez), such that every struct atom has a cfg atom
+    of the same Z at cfg position + t (modulo ax, by and the beam period) and
+    every cfg atom lies on a struct atom (modulo the conventional lattice).
+    Returns (t, largest mismatch [Å]).
     """
-    h, k, l = miller
-    a_b, b_b, c_b = struct['a'], struct['b'], struct['c']
-    conv = np.array([[a_b, 0, 0], [0, b_b, 0], [0, 0, c_b]])
+    cat = [(at['Z'], at['proj_x'] * ly['ax'], at['proj_y'] * ly['by'],
+            ly['z0'] + at['proj_z'] * ly['cz'], ly['ax'], ly['by'])
+           for ly in cfg['layers'] for at in ly['atoms']]
+    if not atoms or not cat:
+        return np.zeros(3), np.inf
+    to_frac = np.linalg.inv(conv.T)
+    s_frac = [(Z, to_frac @ r) for Z, r in atoms]
 
-    prim = primitive_vectors(struct)
-    V_cell = np.dot(prim[0], np.cross(prim[1], prim[2]))
-    rec = np.array([
-        2 * np.pi * np.cross(prim[1], prim[2]) / V_cell,
-        2 * np.pi * np.cross(prim[2], prim[0]) / V_cell,
-        2 * np.pi * np.cross(prim[0], prim[1]) / V_cell,
-    ])
+    def wrap(d, L):
+        return d - L * np.round(d / L)
 
-    # Layer boundaries in Bohr
-    z0_b = z0_ang / BOHR
-    cz_b = cz_ang / BOHR
+    def mismatch(t):
+        worst = 0.0
+        for Z, r in atoms:                                   # struct -> cfg
+            u, v, d = r @ ex - t[0], r @ ey - t[1], r @ ez - t[2]
+            dist = [math.sqrt(wrap(u - cu, cax)**2 + wrap(v - cv, cby)**2 +
+                              wrap(d - cd, period)**2)
+                    for cZ, cu, cv, cd, cax, cby in cat if cZ == Z]
+            worst = max(worst, min(dist) if dist else np.inf)
+        for cZ, cu, cv, cd, _, _ in cat:                    # cfg -> struct
+            f = to_frac @ ((cu + t[0]) * ex + (cv + t[1]) * ey + (cd + t[2]) * ez)
+            dist = [np.linalg.norm(conv.T @ (df - np.round(df)))
+                    for Z, sf in s_frac if Z == cZ for df in [f - sf]]
+            worst = max(worst, min(dist) if dist else np.inf)
+        return worst
 
-    # ── Interstitial: ALL PW with partial z-integral ──
-    pw_d, pw_i = vcoul_dft['pw'], vcoul_iam['pw']
-    dV_pw = pw_d['coeff'] - pw_i['coeff']
+    Z0, r0 = atoms[0]
+    cands = [np.array([r0 @ ex - cu, r0 @ ey - cv, r0 @ ez - cd])
+             for cZ, cu, cv, cd, _, _ in cat if cZ == Z0]
+    if not cands:
+        return np.zeros(3), np.inf
+    return min(((t, mismatch(t)) for t in cands), key=lambda x: x[1])
 
-    G_all = pw_d['G']
-    G_cart_all = (G_all[:, 0:1] * rec[0] +
-                  G_all[:, 1:2] * rec[1] +
-                  G_all[:, 2:3] * rec[2])
-    Kz_all = G_cart_all[:, 2]  # z-component of each G-vector
 
-    # Partial z-integral: ∫_{z0}^{z0+cz} exp(iKz·z) dz
-    z_mid = z0_b + cz_b / 2
-    z_phase = np.zeros(len(Kz_all), dtype=complex)
-    for j in range(len(Kz_all)):
-        kz = Kz_all[j]
-        if abs(kz) < 1e-12:
-            z_phase[j] = cz_b
-        else:
-            z_phase[j] = (np.exp(1j * kz * (z0_b + cz_b)) -
-                          np.exp(1j * kz * z0_b)) / (1j * kz)
-
-    # Real-space grid
-    x = np.linspace(0, a_b, nx, endpoint=False)
-    y = np.linspace(0, b_b, ny, endpoint=False)
-    X, Y = np.meshgrid(x, y, indexing='ij')
-
-    dV_proj_pw = np.zeros((nx, ny))
-    n_significant = 0
-    for j in range(len(dV_pw)):
-        coeff = dV_pw[j] * z_phase[j]
-        if abs(coeff) < 1e-15:
-            continue
-        Gx, Gy = G_cart_all[j, 0], G_cart_all[j, 1]
-        phase = Gx * X + Gy * Y
-        dV_proj_pw += np.real(coeff * np.exp(1j * phase))
-        n_significant += 1
-
-    print(f"    Interstitial: {n_significant} PW significant (of {len(dV_pw)})")
-
-    # ── Muffin-Tin: only atoms within the layer ──
-    dV_proj_mt = np.zeros((nx, ny))
-    c_ang = c_b * BOHR
-
-    for iat, at_s in enumerate(struct['atoms']):
-        R0, RMT, NPT = at_s['R0'], at_s['RMT'], at_s['NPT']
-        dr_log = np.log(RMT / R0) / (NPT - 1)
-        r_grid = R0 * np.exp(np.arange(NPT) * dr_log)
-
-        ch_dft = vcoul_dft['atoms'][iat]['lm_channels']
-        ch_iam = vcoul_iam['atoms'][iat]['lm_channels']
-
-        # Precomputation: Abel projections for all (l,m) channels
-        abel_cache = {}
-        for cd, ci in zip(ch_dft, ch_iam):
-            lv_raw, mv = cd['l'], cd['m']
-            lv = abs(lv_raw)
-            use_sin = (lv_raw < 0)
-            dVlm_r2 = cd['data'] - ci['data']
-            if np.max(np.abs(dVlm_r2)) < 1e-12:
+def apply_bfactor_overrides(layers, tokens, cfg_path):
+    """--bfactors Elem:B — Elem is the exact cfg atom name ("C 1") or its element
+    symbol, i.e. the leading letters of the name ("C 1" -> C, "Si1" -> Si)."""
+    override = {}
+    for tok in tokens:
+        el, val = tok.rsplit(':', 1)
+        override[el.strip()] = float(val)
+    if not override:
+        return
+    used, changed = set(), {}
+    for ly in layers:
+        for at in ly['atoms']:
+            sm = re.match(r'[A-Za-z]+', at['name'].strip())
+            sym = sm.group(0) if sm else None
+            used.update(k for k in (at['name'], sym) if k in override)
+            key = at['name'] if at['name'] in override else (sym if sym in override else None)
+            if key is None:
                 continue
-
-            n_rho = 200
-            rho_grid = np.linspace(0.001, RMT * 0.999, n_rho)
-            dV_r2_interp = interp1d(r_grid, dVlm_r2, kind='cubic',
-                                    fill_value=0, bounds_error=False)
-            V_proj_rho = np.zeros(n_rho)
-
-            for i, rho in enumerate(rho_grid):
-                t_max = np.sqrt(RMT**2 - rho**2)
-                if t_max < 1e-10: continue
-                t_n, t_w = np.polynomial.legendre.leggauss(64)
-                t_n = 0.5 * t_max * (t_n + 1)
-                t_w = 0.5 * t_max * t_w
-                r_n = np.sqrt(t_n**2 + rho**2)
-                dV_r = dV_r2_interp(r_n) / r_n**2
-                cos_t = t_n / r_n
-
-                if mv == 0:
-                    norm = np.sqrt((2*lv+1) / (4*np.pi))
-                    Yp = norm * lpmv(0, lv, cos_t)
-                    Ym = norm * lpmv(0, lv, -cos_t)
-                else:
-                    norm = np.sqrt((2*lv+1)/(4*np.pi) *
-                                  math.factorial(lv-mv)/math.factorial(lv+mv)) * np.sqrt(2)
-                    Yp = norm * lpmv(mv, lv, cos_t)
-                    Ym = norm * lpmv(mv, lv, -cos_t)
-
-                V_proj_rho[i] = np.sum(dV_r * (Yp + Ym) * t_w)
-
-            if np.max(np.abs(V_proj_rho)) < 1e-12: continue
-
-            V_interp = interp1d(rho_grid, V_proj_rho, kind='cubic',
-                                fill_value=0, bounds_error=False)
-            abel_cache[(lv_raw, mv)] = (V_interp, use_sin)
-
-        if not abel_cache:
-            continue
-
-        # Only atoms whose z lies within the layer: z_rel in [0, cz)
-        n_added = 0
-        for pos in at_s['positions']:
-            z_at_ang = pos[2] * c_ang
-            z_rel = (z_at_ang - z0_ang) % c_ang
-            if z_rel >= cz_ang - 1e-4:  # exclude upper boundary (→ next layer)
-                continue
-
-            x_at = pos[0] * conv[0,0] + pos[1] * conv[1,0] + pos[2] * conv[2,0]
-            y_at = pos[0] * conv[0,1] + pos[1] * conv[1,1] + pos[2] * conv[2,1]
-
-            for (lv_raw, mv), (V_interp, use_sin) in abel_cache.items():
-                for px in range(-1, 2):
-                    for py in range(-1, 2):
-                        dx = X - (x_at + px * a_b)
-                        dy = Y - (y_at + py * b_b)
-                        rho = np.sqrt(dx**2 + dy**2)
-                        if mv == 0:
-                            dV_proj_mt += V_interp(rho)
-                        else:
-                            phi = np.arctan2(dy, dx)
-                            if use_sin:
-                                dV_proj_mt += V_interp(rho) * np.sin(mv * phi)
-                            else:
-                                dV_proj_mt += V_interp(rho) * np.cos(mv * phi)
-            n_added += 1
-
-        if n_added > 0:
-            print(f"    Atom {iat+1} ({at_s['element']}): {n_added} positions in layer")
-
-    # Ry·Bohr → 1/Å
-    to_kirk = RY_TO_EV * BOHR / H2_2PI_ME
-    dV_kirk = (dV_proj_pw + dV_proj_mt) * to_kirk
-
-    print(f"    ΔV: [{dV_kirk.min():.4f}, {dV_kirk.max():.4f}] 1/Å")
-    return dV_kirk
-
+            changed.setdefault((at['name'], at['Z']), (at['B'], key))
+            at['B'] = override[key]
+    for (name, Z), (B_old, key) in changed.items():
+        print(f"    B override {key}: {name}(Z={Z}) B={B_old:.3f} → {override[key]:.3f} Å²")
+    unused = [el for el in override if el not in used]
+    if unused:
+        names = sorted(set(at['name'] for ly in layers for at in ly['atoms']))
+        sys.exit(f"Error: --bfactors {', '.join(unused)} matched no atom in {cfg_path} "
+                 f"(atom names: {', '.join(repr(n) for n in names)})")
 
 
 # ═══════════════════════════════════════════════════════════════
-# TIFF output (ixchel format)
-# ═══════════════════════════════════════════════════════════════
-
-def write_ixchel_tiff(filename, data_yx):
-    Path(filename).parent.mkdir(parents=True, exist_ok=True)
-    data = data_yx.astype(np.float32)
-    vmin, vmax = float(data.min()), float(data.max())
-    if vmax == vmin: vmax = vmin + 1e-6
-    preview = np.clip((data-vmin)/(vmax-vmin)*255, 0, 255).astype(np.uint8)
-    preview_rgb = np.stack([preview, preview, preview], axis=-1)
-    meta = np.zeros((1, 2), dtype=np.uint32)
-    with tifffile.TiffWriter(filename) as tfw:
-        tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
-        tfw.write(data,        photometric='minisblack', contiguous=False)
-        tfw.write(meta,        photometric='minisblack', contiguous=False)
-    print(f"    → {filename}  [{vmin:.4g} … {vmax:.4g}] 1/Å")
-
-
-# ═══════════════════════════════════════════════════════════════
-# Main program
+# Main
 # ═══════════════════════════════════════════════════════════════
 
 def main():
     ap = argparse.ArgumentParser(
-        description='WIEN2k native vcoul → ixchel TIF (analytical projection)')
-    ap.add_argument('--vcoul-dft', required=True, help='case.vcoul_DFT')
-    ap.add_argument('--vcoul-iam', required=True, help='case.vcoul_IAM')
-    ap.add_argument('--struct',    required=True, help='case.struct')
-    ap.add_argument('--fparams',   required=True, help='fparams.dat')
-    ap.add_argument('--cfg',       required=True, help='ixchel crystruct.cfg')
-    ap.add_argument('--miller', type=int, nargs=3, default=[0,0,1],
-                    metavar=('H','K','L'))
-    ap.add_argument('--bfactors', nargs='+', default=[], metavar='Elem:B')
+        description='WIEN2k vcoul (DFT − IAM, evaluated by lapw5) + Kirkland → ixchel TIFFs')
+    ap.add_argument('--vcoul-dft', required=True, help='case.vcoul from the SCF density')
+    ap.add_argument('--vcoul-iam', required=True, help='case.vcoul from the dstart density')
+    ap.add_argument('--struct', required=True, help='case.struct')
+    ap.add_argument('--cfg', required=True, help='ixchel crystal-structure cfg (crystruct)')
+    ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1], metavar=('H', 'K', 'L'),
+                    help='beam direction (conventional cell); in-plane axes from '
+                         'inplane_vectors unless --frame is given (default 0 0 1)')
+    ap.add_argument('--frame', type=int, nargs=9, metavar='N',
+                    help='crystruct triplet "x1 x2 x3  y1 y2 y3  z1 z2 z3" the cfg was made with')
+    ap.add_argument('--bfactors', nargs='+', default=[], metavar='Elem:B',
+                    help='B-factor overrides (ixchel convention exp(-B k²)); Elem = element '
+                         'symbol (leading letters of the cfg atom name) or exact cfg name')
+    ap.add_argument('--dx', type=float, default=0.025,
+                    help='target lateral pixel size of the unit-cell TIFF [Å] (default 0.025)')
+    ap.add_argument('--dz', type=float, default=0.05,
+                    help='sampling step of ΔV along the beam [Å] (default 0.05)')
+    ap.add_argument('--vacuum-depth', type=float, default=None, metavar='D',
+                    help='cfg depth [Å] of a plane in the vacuum; ΔV is shifted to zero mean '
+                         'there (slabs only; default: no shift)')
+    ap.add_argument('--nproc', type=int, default=None, help='parallel lapw5 processes')
+    ap.add_argument('--nshell', type=int, nargs=3, default=[2, 2, 2],
+                    help='lapw5 neighbour shells (default 2 2 2)')
+    ap.add_argument('--workdir', default=None, help='keep the lapw5 files here (default: temporary)')
     ap.add_argument('-o', '--output', default=None)
     args = ap.parse_args()
 
-    h, k, l = args.miller
-    out_dir = args.output or f"wien2k_analytical_{''.join(str(abs(x)) for x in [h,k,l])}"
+    if args.frame:
+        v1, v2, v3 = args.frame[0:3], args.frame[3:6], args.frame[6:9]
+    else:
+        v3 = list(args.miller)
+        v1, v2 = xsf.inplane_vectors(v3)
+    v1, v2, v3 = ([int(x) for x in v] for v in (v1, v2, v3))
+    tag = ''.join(str(abs(x)) for x in v3)
+    out_dir = args.output or f"wien2k_{tag}"
 
-    # ── Reading input ──
-    print(f"\n[1] Reading struct: {args.struct}")
-    struct = read_struct(args.struct)
-    print(f"    {struct['lattice_type']}: "
-          f"a={struct['a']*BOHR:.4f}, b={struct['b']*BOHR:.4f}, "
-          f"c={struct['c']*BOHR:.4f} Å")
+    # ── struct and potentials ───────────────────────────────────────────────
+    print(f"\n[1] struct: {args.struct}")
+    struct = l5.read_struct(args.struct)
+    try:
+        conv = l5.conventional_vectors_ang(struct)
+    except NotImplementedError as e:
+        sys.exit(f"Error: {e}")
+    print(f"    lattice {struct['lattice']}, a, b, c = "
+          + ", ".join(f"{np.linalg.norm(v):.4f}" for v in conv) + " Å")
 
-    print(f"\n[2] Reading native vcoul files...")
-    vcoul_dft = parse_vcoul(args.vcoul_dft)
-    vcoul_iam = parse_vcoul(args.vcoul_iam)
-    n_pw = vcoul_dft['pw']['n_pw']
-    print(f"    DFT: {len(vcoul_dft['atoms'])} atoms, {n_pw} PW")
-    print(f"    IAM: {len(vcoul_iam['atoms'])} atoms, {vcoul_iam['pw']['n_pw']} PW")
-
-    print(f"\n[3] Reading fparams: {args.fparams}")
-    fp = read_fparams(args.fparams)
-
-    print(f"\n[4] Reading cfg: {args.cfg}")
-    cfg = parse_cfg(args.cfg)
+    # ── cfg ─────────────────────────────────────────────────────────────────
+    print(f"\n[2] cfg: {args.cfg}")
+    try:
+        cfg = xsf.parse_cfg(args.cfg)
+    except ValueError as e:
+        sys.exit(f"Error: {e}")
     layers = cfg['layers']
-    print(f"    {len(layers)} layers, total thickness {cfg['total_z']:.3f} Å")
-
-    # B-factor overrides
-    bfactor_override = {}
-    for tok in args.bfactors:
-        el, val = tok.split(':')
-        bfactor_override[el.strip()] = float(val)
-    if bfactor_override:
-        for ly in layers:
-            for at in ly['atoms']:
-                if at['name'] in bfactor_override:
-                    at['B'] = bfactor_override[at['name']]
-
-    # Display B-factors
+    print(f"    {len(layers)} layer(s), {len(cfg['slices'])} slice(s), total thickness "
+          f"{cfg['total_z']:.3f} Å, dim {cfg['dim'][0]}×{cfg['dim'][1]}, "
+          f"NCELL {cfg['ncell'][0]}×{cfg['ncell'][1]}, "
+          + ("subslicing" if cfg['subslicing'] else "classical projection"))
+    apply_bfactor_overrides(layers, args.bfactors, args.cfg)
     seen = {}
     for ly in layers:
         for at in ly['atoms']:
-            key = (at['name'], at['Z'])
-            if key not in seen:
-                seen[key] = at['B']
-    for (sym, Z), B in sorted(seen.items(), key=lambda x: x[1]):
-        print(f"    {sym}(Z={Z}): B={B:.3f} Å²  σ_DW={np.sqrt(B/(8*np.pi**2))*1000:.1f} mÅ")
+            seen.setdefault((at['name'], at['Z']), at['B'])
+    for (name, Z), B in sorted(seen.items(), key=lambda x: x[1]):
+        print(f"    {name}(Z={Z}): B={B:.3f} Å²  σ_DW={np.sqrt(B / (2 * np.pi**2)) * 1000:.1f} mÅ")
 
-    # ── Projection per layer ──
-    print(f"\n[5] Analytical ΔV projection [{h}{k}{l}] per layer...")
-    dx_target = 0.025  # ~25 mÅ
-
-    outs = []
+    # ── frame ───────────────────────────────────────────────────────────────
+    X = [conv.T @ np.array(v, float) for v in (v1, v2, v3)]
+    L = [np.linalg.norm(x) for x in X]
+    if min(L) == 0:
+        sys.exit(f"Error: degenerate frame {v1} {v2} {v3}")
+    ex, ey, ez = (x / n for x, n in zip(X, L))
+    for (i, j) in ((0, 1), (0, 2), (1, 2)):
+        if abs(X[i] @ X[j]) > 1e-6 * L[i] * L[j]:
+            sys.exit(f"Error: frame {v1} {v2} {v3} is not orthogonal in this cell")
+    period = L[2]
+    print(f"\n[3] frame: x = {v1} ({L[0]:.4f} Å), y = {v2} ({L[1]:.4f} Å), "
+          f"beam = {v3} (period {period:.4f} Å)")
     for ly in layers:
-        ax_l, by_l = ly['ax'], ly['by']
-        cz_l, z0_l = ly['cz'], ly['z0']
-        nx_l = max(16, round(ax_l / dx_target))
-        ny_l = max(16, round(by_l / dx_target))
+        if abs(ly['ax'] - L[0]) > 1e-3 * L[0] or abs(ly['by'] - L[1]) > 1e-3 * L[1]:
+            sys.exit(f"Error: layer '{ly['label']}' size_uc {ly['ax']:.4f} × {ly['by']:.4f} Å does not "
+                     f"match |x| × |y| = {L[0]:.4f} × {L[1]:.4f} Å; pass the crystruct triplet "
+                     f"with --frame")
+    atoms = struct_atoms_cart(struct, conv)
+    t, err = frame_offset(atoms, cfg, conv, ex, ey, ez, period)
+    print(f"    cfg origin at struct (x, y, depth) = ({t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}) Å, "
+          f"largest atom mismatch {err:.3g} Å")
+    if not err < 0.05:
+        sys.exit("Error: the cfg atoms do not coincide with the struct atoms in this frame; "
+                 "pass the crystruct triplet the cfg was made with (--frame)")
+    try:
+        windows = {ly['label']: xsf.dv_window(ly, cfg) for ly in layers}
+    except ValueError as e:
+        sys.exit(f"Error: {e}")
 
-        syms = '+'.join(sorted(set(a['name'] for a in ly['atoms'])))
-        print(f"\n  Layer '{ly['label']}' ({syms}): "
-              f"z0={z0_l:.3f}, cz={cz_l:.3f} Å, {nx_l}×{ny_l}px")
+    # ── ΔV with lapw5 ───────────────────────────────────────────────────────
+    print(f"\n[4] lapw5: {args.vcoul_dft} − {args.vcoul_iam}")
+    runner = l5.Lapw5Runner(args.struct, args.vcoul_dft, args.vcoul_iam, norm='val',
+                            nshell=tuple(args.nshell), workdir=args.workdir,
+                            nproc=args.nproc, keep=args.workdir is not None)
+    to_frac = np.linalg.inv(conv.T)
+    outs = []
+    try:
+        dv_shift = 0.0                                              # [V], subtracted from ΔV_s
+        if args.vacuum_depth is not None:
+            # planes at D and D ± 1 Å: a charged (non-neutral) starting density gives a
+            # parabolic vacuum potential that is flat laterally but not along the depth
+            nxv = max(16, round(layers[0]['ax'] / args.dx))
+            nyv = max(16, round(layers[0]['by'] / args.dx))
+            vac = {}
+            for dd in (-1.0, 0.0, 1.0):
+                o = to_frac @ (t[0] * ex + t[1] * ey + (args.vacuum_depth + dd + t[2]) * ez)
+                plane = runner.plane(o, o + np.array(v1, float), o + np.array(v2, float),
+                                     nxv + 1, nyv + 1, tag=f'vacuum{int(dd):+d}')
+                vac[dd] = -plane[:nxv, :nyv] * RY_TO_V
+            dv_shift = float(vac[0.0].mean())
+            spread = max(float(v.max()) for v in vac.values()) - min(float(v.min()) for v in vac.values())
+            print(f"    vacuum plane at cfg depth {args.vacuum_depth:.3f} Å: ΔV_s = {dv_shift:+.4f} V → subtracted; "
+                  f"spread over the planes at depth ±1 Å: {spread * 1000:.2f} mV")
+            if spread > 5e-3:
+                print("    WARNING: ΔV is not constant around the vacuum plane — the planes are not in "
+                      "the vacuum, or the IAM (dstart) density is not neutral; check ':NEC01' and "
+                      "'Normalization of interstitial' in case.outputd and regenerate case.vcoul_IAM")
 
-        # Kirkland IAM
-        kirk = kirkland_layer_fp(ly['atoms'], ax_l, by_l, nx_l, ny_l, fp)
+        for ly in layers:
+            ax, by = ly['ax'], ly['by']
+            nx = max(16, round(ax / args.dx))
+            ny = max(16, round(by / args.dx))
+            w0, wlen = windows[ly['label']]
+            nz = max(2, math.ceil(wlen / args.dz))
+            if nx * cfg['ncell'][0] < cfg['dim'][0] or ny * cfg['ncell'][1] < cfg['dim'][1]:
+                print(f"    WARNING: '{ly['label']}': unit-cell grid {nx}×{ny} px is coarser "
+                      f"than dim/NCELL — band limit below ixchel's")
+            syms = '+'.join(sorted(set(a['name'] for a in ly['atoms'])))
+            print(f"\n  layer '{ly['label']}' ({syms}): {ax:.3f} × {by:.3f} Å, {nx}×{ny} px, "
+                  f"ΔV window [{w0:.3f}, {w0 + wlen:.3f}) Å (cfg depth), {nz} steps")
 
-        # Analytical ΔV projection for this layer
-        dpot = project_dV_layer(vcoul_dft, vcoul_iam, struct,
-                                (h, k, l), z0_l, cz_l, None, nx_l, ny_l)
+            origin = to_frac @ (t[0] * ex + t[1] * ey + (w0 + t[2]) * ez)
+            edges = [np.array(v1, float), np.array(v2, float), np.array(v3, float) * (wlen / period)]
+            dV = runner.grid3d(origin, edges, (nx + 1, ny + 1, nz + 1))
+            Vs = -dV[:nx, :ny, :] * RY_TO_V - dv_shift              # V_s = −V_C [V]
+            dpot = np.trapezoid(Vs, dx=wlen / nz, axis=2) / H2_2PI_ME  # [1/Å]
 
-        tot = kirk + dpot
-        print(f"    Kirk=[{kirk.min():.3f},{kirk.max():.3f}]  "
-              f"ΔV=[{dpot.min():.3f},{dpot.max():.3f}]  "
-              f"tot=[{tot.min():.3f},{tot.max():.3f}] 1/Å")
+            kirk = xsf.kirkland_layer(ly, cfg, nx, ny, xsf.FPARAMS)
+            tot = kirk + dpot
+            print(f"    Kirkland [{kirk.min():.3f}, {kirk.max():.3f}]  "
+                  f"ΔV [{dpot.min():.4f}, {dpot.max():.4f}] (mean {dpot.mean():+.4f})  "
+                  f"total [{tot.min():.3f}, {tot.max():.3f}] 1/Å")
+            fname = f"{out_dir}/{ly['filename']}"
+            xsf.write_ixchel_tiff(fname, tot.T)                    # rows = y
+            outs.append(fname)
+    finally:
+        runner.close()
 
-        write_ixchel_tiff(f"{out_dir}/{ly['filename']}", tot.T)
-        outs.append(f"{out_dir}/{ly['filename']}")
-
-    print(f"\nDone — {len(outs)} files in '{out_dir}/':")
-    for f in outs:
-        print(f"  {f}")
+    print(f"\nDone — {len(outs)} file(s) in '{out_dir}/' (one unit cell each; "
+          f"use tiff2ixchel.py for ixchel main)")
 
 
 if __name__ == '__main__':
