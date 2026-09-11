@@ -1,34 +1,55 @@
 #!/usr/bin/env python3
 """
-vcoul2tiff_ulm4.py — Ulm-Ansatz (Kurasch et al. 2011), gepatcht
+vcoul2tiff_ulm.py — re-implementation of the Kurasch et al. (2011) route
 
-Aenderungen ggü. _ulm3:
-  (1) read_xsf erkennt die XSF-Achsenreihenfolge automatisch (Fortran vs C),
-      statt blind reshape((nx,ny,nz)) [C-Order] zu nehmen. Standard-XSF
-      (WIEN2k/XCrySDen) ist x-schnellster = Fortran-Order. Falscher reshape
-      verwürfelt die Voxel -> Kern-Cusp landet im Interstitial.
-  (2) XSF general grid: n Punkte spannen 0..L INKLUSIVE (letzte Ebene =
-      periodisches Abbild der ersten). Voxelgröße ist span/(n-1), und die
-      Projektion lässt die Duplikatebene weg (sonst Doppelzählung + ~1/n
-      Skalenfehler).
+Projects the total WIEN2k Coulomb potential (case.vcoul exported to XSF with
+3ddens) onto ixchel-compatible TIFFs following the recipe of
 
-Methode (Kurasch et al. Beilstein J. Nanotechnol. 2011, 2, 394):
-  1. 3D-Potential aus XSF lesen [Ry, Span-Vektoren in Å]
-  2. Nearest-Neighbor-Cutoff: V < -cutoff_Ry -> max(Nachbarn im 3x3x3).
-  3. Projektion pro Layer entlang der Strahlrichtung (Miller-Index).
-  4. Vorzeichenumkehr: V_s = -V_WIEN2k  (Streupotential > 0 bei Kernen)
-  5. Einheiten: V_Ry x dz_A x (V/Ry) / H2_2PI_ME -> 1/A
+    S. Kurasch, J. C. Meyer, D. Künzel, A. Groß, U. Kaiser,
+    "Simulation of bonding effects in HRTEM images of light element materials",
+    Beilstein J. Nanotechnol. 2, 394-404 (2011), doi:10.3762/bjnano.2.45
 
-Verwendung:
-    python3 vcoul2tiff_ulm4.py \\
+as literally as the paper allows.  The script exists as a comparison for
+vcoul2tiff.py; deviations from the paper are bugs, not improvements.
+
+Method (paper p. 397-399):
+  1. Read the 3D potential from XSF                 [Ry, span vectors in Å]
+  2. Nearest-neighbour cutoff (p. 397): "Whenever a value in the 3D potential
+     is higher than some cutoff value, we change this value to the highest
+     value in the neighboring pixels."  Cutoff used in the paper: -50 kV (p. 399).
+  3. Normalisation (p. 397): "the potential was shifted (i.e., smallest value
+     was set to zero)"; p. 399: the 3D potentials were "sliced, normalized and
+     projected".
+  4. Projection along the beam direction, layer by layer (ixchel cfg).
+  5. Units: Ry -> V·Å -> Kirkland units 1/Å (divide by h²/(2π m_e e) = 47.88 V·Å²).
+
+Sign convention:
+  WIEN2k stores the Coulomb potential energy of an electron in Ry: V_C < 0 near
+  the nuclei, V_C -> small positive constant in vacuum.  The paper plots the
+  scattering potential V_s = -V_C (Fig. 2/3, "potential in V" > 0) but quotes
+  the cutoff as "-50 kV", i.e. in WIEN2k sign.  "Higher than the cutoff" thus
+  means V_C < -50 kV (larger magnitude) and "highest value in the neighboring
+  pixels" means the neighbour with the largest V_s, i.e. the most negative V_C.
+  See apply_nn_cutoff() for the two readings and their consequences.
+
+XSF conventions (3ddens):
+  General grid: n points span 0..L inclusive, the last plane is the periodic
+  image of the first.  Voxel size is L/(n-1); the duplicate plane is dropped
+  before projecting.  Standard XSF data order is x fastest (Fortran order);
+  it is detected automatically because older exports differed.
+
+Supported beam directions: [001], [100], [010] (axis-parallel projections).
+General [hkl] would need a rotated/interpolated grid and is rejected.
+
+Usage:
+    python3 vcoul2tiff_ulm.py \\
         --xsf Graphene_vcoul_DFT.xsf \\
         --cfg Graphene_ixchel_001.cfg \\
         --miller 0 0 1 \\
-        [--order auto|F|C] \\
-        [--cutoff 50000] \\
-        [-o wien2k_001]
+        [--cutoff 50000] [--stencil 6|26] [--nn-value highest|lowest] \\
+        [--no-normalize] [--order auto|F|C] [-o wien2k_ulm_001]
 
-Abhaengigkeiten: numpy, scipy, tifffile
+Dependencies: numpy, scipy, tifffile
 """
 
 import argparse
@@ -37,56 +58,52 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import maximum_filter
+from scipy.ndimage import maximum_filter, minimum_filter
 import tifffile
 
 
 # ═══════════════════════════════════════════════════════════════
-# Konstanten
+# Constants
 # ═══════════════════════════════════════════════════════════════
 
-BOHR      = 0.529177210903   # Bohr -> Angstrom
-RY_TO_V   = 13.605693122994  # Ry -> V
-H2_2PI_ME = 47.88            # hbar^2/(2pi*m_e*e) [V*A^2]  (Kirkland/ixchel)
+BOHR      = 0.529177210903   # Bohr -> Å (not needed for XSF input, kept for reference)
+RY_TO_V   = 13.605693122994  # 1 Ry = 13.606 eV -> potential of an electron: 13.606 V
+H2_2PI_ME = 47.88            # h²/(2π m_e e) [V·Å²]  (Kirkland/ixchel unit of V_z)
 
 
 # ═══════════════════════════════════════════════════════════════
-# XSF-Leser  (mit Achsenreihenfolge-Auto-Erkennung)
+# XSF reader (with automatic detection of the data order)
 # ═══════════════════════════════════════════════════════════════
 
 def _roughness(d):
-    """Mittlere absolute Nachbardifferenz über alle 3 Achsen.
-    Korrekt geordnete Potentialdaten sind glatt (außer am Cusp) -> klein.
-    Verwürfelte Daten sind quasi-Rauschen -> groß."""
+    """Mean absolute neighbour difference over all three axes.  Correctly
+    ordered potential data is smooth (except at the cusps) -> small; scrambled
+    data is quasi-noise -> large."""
     return sum(np.mean(np.abs(np.diff(d, axis=ax))) for ax in range(3))
 
 
 def _reshape_xsf(vals, nx, ny, nz, order):
-    """order: 'F' (Standard-XSF, x schnellster), 'C' (z schnellster),
-       'auto' (per Glattheit entscheiden)."""
+    """order: 'F' (standard XSF, x fastest), 'C' (z fastest),
+       'auto' (decide by smoothness)."""
     arr = np.asarray(vals[:nx * ny * nz], dtype=np.float64)
     if order in ('F', 'C'):
         return arr.reshape((nx, ny, nz), order=order), order
-    # auto
     dF = arr.reshape((nx, ny, nz), order='F')
     dC = arr.reshape((nx, ny, nz), order='C')
     rF, rC = _roughness(dF), _roughness(dC)
     if rF <= rC:
-        print(f"    Achsen-Auto: order='F' (Standard-XSF)  "
-              f"[roughness F={rF:.3f} < C={rC:.3f}]")
+        print(f"    data order: 'F' (standard XSF)  [roughness F={rF:.3f} < C={rC:.3f}]")
         return dF, 'F'
-    else:
-        print(f"    Achsen-Auto: order='C' (nicht-standard)  "
-              f"[roughness C={rC:.3f} < F={rF:.3f}]")
-        return dC, 'C'
+    print(f"    data order: 'C' (non-standard)  [roughness C={rC:.3f} < F={rF:.3f}]")
+    return dC, 'C'
 
 
 def read_xsf(path, order='auto'):
     """
-    Liest 3D-Daten aus XSF (von WIEN2k). Span-Vektoren in Angstrom,
-    Werte in Ry.
+    Read a 3D data grid from an XSF file written by WIEN2k 3ddens.
+    Span vectors are in Å, values in Ry.
 
-    Rueckgabe: data [nx,ny,nz] (Ry), (ax,by,cz) [A], (nx,ny,nz)
+    Returns: data [nx,ny,nz] (Ry), (ax,by,cz) [Å], (nx,ny,nz)
     """
     with open(path) as f:
         lines = f.readlines()
@@ -98,11 +115,11 @@ def read_xsf(path, order='auto'):
             break
         i += 1
     else:
-        sys.exit("Fehler: Kein DATAGRID_3D-Block in XSF gefunden.")
+        sys.exit("Error: no DATAGRID_3D block found in XSF.")
     i += 1
 
     nx, ny, nz = map(int, lines[i].split());  i += 1
-    i += 1  # origin (ignoriert)
+    i += 1  # origin (ignored)
     va = np.array(list(map(float, lines[i].split())));  i += 1
     vb = np.array(list(map(float, lines[i].split())));  i += 1
     vc = np.array(list(map(float, lines[i].split())));  i += 1
@@ -115,7 +132,7 @@ def read_xsf(path, order='auto'):
         i += 1
 
     if len(vals) < nx * ny * nz:
-        sys.exit(f"Fehler: Zu wenig Datenpunkte ({len(vals)} < {nx*ny*nz}).")
+        sys.exit(f"Error: too few data points ({len(vals)} < {nx*ny*nz}).")
 
     data, used = _reshape_xsf(vals, nx, ny, nz, order)
 
@@ -127,20 +144,21 @@ def read_xsf(path, order='auto'):
 
 
 # ═══════════════════════════════════════════════════════════════
-# cfg-Parser (ixchel crystruct.cfg)  — unverändert
+# cfg parser (ixchel crystruct.cfg)
 # ═══════════════════════════════════════════════════════════════
 
 def parse_cfg(cfg_path):
+    """Read the layer geometry (size_uc, filename, stacking) from an ixchel cfg."""
     text = Path(cfg_path).read_text()
 
     sm = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
     if not sm:
-        sys.exit("Fehler: stack_seq nicht in cfg gefunden.")
+        sys.exit("Error: stack_seq not found in cfg.")
     seq = list(sm.group(1))
 
     lm = re.search(r'layers\s*=\s*\{', text)
     if not lm:
-        sys.exit("Fehler: layers-Block nicht in cfg gefunden.")
+        sys.exit("Error: layers block not found in cfg.")
     depth = 0; j = lm.end() - 1
     while j < len(text):
         if text[j] == '{':   depth += 1
@@ -183,7 +201,7 @@ def parse_cfg(cfg_path):
     z0 = 0.0
     for label in seq:
         if label not in layer_defs:
-            sys.exit(f"Fehler: Layer '{label}' nicht in layer_defs.")
+            sys.exit(f"Error: layer '{label}' not defined in layers block.")
         ld = layer_defs[label]
         layers.append({
             'label': label,
@@ -197,10 +215,59 @@ def parse_cfg(cfg_path):
 
 
 # ═══════════════════════════════════════════════════════════════
-# Nearest-Neighbor-Cutoff (Kurasch et al. 2011)  — unverändert
+# Nearest-neighbour cutoff (Kurasch et al. 2011, p. 397 and Fig. 3)
 # ═══════════════════════════════════════════════════════════════
 
-def apply_nn_cutoff(data_3d, cutoff_ry):
+def _footprint(stencil, size):
+    """Neighbourhood used to pick the replacement value.
+    size == 3: 6 face neighbours (stencil=6) or the full 3x3x3 cube (stencil=26).
+    size  > 3: growing cube, only used when a flagged voxel has no valid
+               neighbour at all (cluster of flagged voxels)."""
+    if stencil == 26 or size > 3:
+        return np.ones((size, size, size), dtype=bool)
+    fp = np.zeros((3, 3, 3), dtype=bool)
+    fp[1, 1, :] = fp[1, :, 1] = fp[:, 1, 1] = True
+    return fp
+
+
+def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
+    """
+    Replace voxels beyond the cutoff by a value taken from their neighbours.
+
+    Paper (p. 397): "Whenever a value in the 3D potential is higher than some
+    cutoff value, we change this value to the highest value in the neighboring
+    pixels."  This is a replacement, not a clamp: the flagged voxel takes a
+    neighbour's value, the threshold itself never appears in the data.
+
+    Flagging.  data_3d is in WIEN2k sign (V_C < 0 at the nuclei) and the paper
+    quotes its cutoff as "-50 kV", so "higher than the cutoff" is read as
+    larger in magnitude:  flagged  <=>  V_C < -cutoff_ry.
+
+    Replacement value ("highest value in the neighboring pixels"):
+      nn_value='highest' (default, the paper's reading): the neighbour with the
+        highest scattering potential V_s = -V_C, i.e. the most negative V_C —
+        the neighbour closest to the nucleus.  The flagged voxel becomes a
+        plateau at the level of its nearest neighbour.
+      nn_value='lowest': the least negative neighbour (what a maximum_filter on
+        WIEN2k-sign data gives; behaviour of earlier versions of this script).
+        This carves a dip into the potential at the nucleus and is kept only
+        for comparison.
+    For a nucleus sitting exactly on a grid point of an isotropic grid all face
+    neighbours are equal by symmetry and the two readings coincide; they differ
+    for off-grid nuclei, anisotropic voxels and clusters of flagged voxels.
+
+    Neighbourhood.  The paper says "neighboring pixels" without a stencil.
+    Default is the 6 face neighbours (the literal nearest neighbours; with
+    nn_value='highest' the 20 edge/corner voxels of a 3x3x3 cube can hardly
+    win anyway because they are farther from the nucleus); stencil=26 uses the
+    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic.
+
+    Clusters.  Only voxels below the threshold are ever changed; if a flagged
+    voxel has no valid neighbour (all flagged) the search cube grows by one
+    shell and the pass is repeated.  Passes repeat until nothing is flagged.
+
+    Returns (data, n_replaced).
+    """
     data = data_3d.copy()
     n_replaced = int((data < -cutoff_ry).sum())
     if n_replaced == 0:
@@ -211,26 +278,38 @@ def apply_nn_cutoff(data_3d, cutoff_ry):
         bad = data < -cutoff_ry
         if not bad.any():
             break
-        tmp = np.where(bad, -np.inf, data)
-        nb_max = maximum_filter(tmp, size=size, mode='wrap')
-        no_valid = bad & (nb_max == -np.inf)
+        fp = _footprint(stencil, size)
+        # mask flagged voxels with +/-inf so the rank filter ignores them
+        if nn_value == 'highest':
+            nb = minimum_filter(np.where(bad, np.inf, data), footprint=fp, mode='wrap')
+        else:
+            nb = maximum_filter(np.where(bad, -np.inf, data), footprint=fp, mode='wrap')
+        no_valid = bad & np.isinf(nb)
         if no_valid.any():
-            size += 2
+            size += 2   # cluster of flagged voxels -> widen the search
             continue
-        data = np.where(bad, nb_max, data)
-        size = 3
+        data = np.where(bad, nb, data)
+        size = 3        # reset for the next pass
 
     remaining = int((data < -cutoff_ry).sum())
     if remaining > 0:
-        print(f"    WARNUNG: {remaining} Voxel nach Cutoff immer noch < -Schwellwert")
+        print(f"    WARNING: {remaining} voxels still below -cutoff after 20 passes")
     return data, n_replaced
 
 
 # ═══════════════════════════════════════════════════════════════
-# Projektion entlang Miller-Richtung  (Endpunkt-/dz-Konvention korrigiert)
+# Projection along an axis-parallel beam direction
 # ═══════════════════════════════════════════════════════════════
 
 def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
+    """
+    Sum the 3D potential over the voxels of one ixchel layer along the beam.
+
+    Returns:
+        proj_yx  : 2D array [nrow=y, ncol=x] in Ry (plain sum, no unit factor)
+        d_proj   : voxel size along the projection axis [Å]
+        n_slices : number of voxel planes summed
+    """
     h, k, l = miller
     ax_ang, by_ang, cz_ang = cell_ang
     nx, ny, nz = shape
@@ -238,26 +317,27 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     nonzero = [x for x in [h, k, l] if x != 0]
     if len(nonzero) != 1:
         sys.exit(
-            f"Fehler: Miller [{h}{k}{l}] nicht unterstuetzt.\n"
-            f"  Nur [001], [100], [010] moeglich (achsenparallele Projektionen)."
+            f"Error: Miller index [{h}{k}{l}] not supported.\n"
+            f"  Only [001], [100], [010] (axis-parallel projections) are possible."
         )
 
-    if l != 0:       # [001]: beam entlang c, sum axis=2
+    if l != 0:       # [001]: beam along c, sum over axis 2
         n_pts = nz;   span = cz_ang;   axis = 2
-    elif h != 0:     # [100]: beam entlang a, sum axis=0
+    elif h != 0:     # [100]: beam along a, sum over axis 0
         n_pts = nx;   span = ax_ang;   axis = 0
-    else:            # [010]: beam entlang b, sum axis=1
+    else:            # [010]: beam along b, sum over axis 1
         n_pts = ny;   span = by_ang;   axis = 1
 
-    # XSF general grid: n_pts Punkte spannen 0..span INKLUSIVE.
-    # Es gibt n_pts-1 eindeutige Intervalle; letzte Ebene == erste.
+    # XSF general grid: n_pts points span 0..span INCLUSIVE, i.e. n_pts-1
+    # unique intervals; the last plane duplicates the first.
     n_int  = max(n_pts - 1, 1)
-    d_proj = span / n_int                       # korrekte Voxelgröße [A]
+    d_proj = span / n_int                       # voxel size [Å]
 
+    # map the layer boundaries (from the cfg) onto voxel planes
     i_lo = int(round(z0_ang            / span * n_int))
     i_hi = int(round((z0_ang + cz_lay) / span * n_int))
     i_lo = max(0, min(i_lo, n_int))
-    i_hi = max(0, min(i_hi, n_int))             # Slice [..:i_hi) lässt Index n_pts-1 (Duplikat) weg
+    i_hi = max(0, min(i_hi, n_int))             # [..:i_hi) never includes plane n_pts-1
     n_slices = i_hi - i_lo
 
     if n_slices == 0:
@@ -275,10 +355,12 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
 
 
 # ═══════════════════════════════════════════════════════════════
-# TIFF-Ausgabe (ixchel-Format)  — unverändert
+# TIFF output (ixchel format)
 # ═══════════════════════════════════════════════════════════════
 
 def write_ixchel_tiff(filename, data_yx):
+    """Write an ixchel-compatible TIFF: page 0 RGB preview, page 1 float32 data,
+    page 2 metadata placeholder."""
     Path(filename).parent.mkdir(parents=True, exist_ok=True)
     data = data_yx.astype(np.float32)
     vmin, vmax = float(data.min()), float(data.max())
@@ -291,68 +373,108 @@ def write_ixchel_tiff(filename, data_yx):
         tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
         tfw.write(data,        photometric='minisblack', contiguous=False)
         tfw.write(meta,        photometric='minisblack', contiguous=False)
-    print(f"    -> {filename}  [{vmin:.4g} ... {vmax:.4g}] 1/A")
+    print(f"    -> {filename}  [{vmin:.4g} ... {vmax:.4g}] 1/Å")
 
 
 # ═══════════════════════════════════════════════════════════════
-# Hauptprogramm
+# Main
 # ═══════════════════════════════════════════════════════════════
 
 def main():
     ap = argparse.ArgumentParser(
-        description='Ulm-Ansatz (Kurasch 2011): vcoul XSF -> ixchel TIF')
-    ap.add_argument('--xsf',    required=True)
-    ap.add_argument('--cfg',    required=True)
+        description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
+    ap.add_argument('--xsf',    required=True,
+                    help='total Coulomb potential as XSF (3ddens on case.vcoul)')
+    ap.add_argument('--cfg',    required=True,
+                    help='ixchel crystruct.cfg (layer geometry)')
     ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1],
-                    metavar=('H', 'K', 'L'))
+                    metavar=('H', 'K', 'L'),
+                    help='beam direction (default: 0 0 1)')
     ap.add_argument('--order',  choices=['auto', 'F', 'C'], default='auto',
-                    help="XSF-Achsenreihenfolge (Standard: auto)")
+                    help='XSF data order (default: auto)')
     ap.add_argument('--cutoff', type=float, default=50000,
-                    help='Cutoff-Schwellwert in Volt (Standard: 50000)')
-    ap.add_argument('-o', '--output', default='wien2k_ulm')
+                    help='cutoff in volt (default: 50000, paper: -50 kV)')
+    ap.add_argument('--stencil', type=int, choices=[6, 26], default=6,
+                    help='neighbourhood for the replacement value (default: 6 face neighbours)')
+    ap.add_argument('--nn-value', choices=['highest', 'lowest'], default='highest',
+                    help="'highest' scattering potential among the neighbours (paper) "
+                         "or 'lowest' (earlier behaviour); see apply_nn_cutoff()")
+    ap.add_argument('--no-normalize', action='store_true',
+                    help='skip the paper normalisation (smallest V_s set to zero)')
+    ap.add_argument('-o', '--output', default='wien2k_ulm',
+                    help='output directory')
     args = ap.parse_args()
 
     h, k, l   = args.miller
-    cutoff_Ry = args.cutoff / RY_TO_V
+    cutoff_Ry = args.cutoff / RY_TO_V   # 50000 V / 13.606 V/Ry ~ 3675 Ry
     out_dir   = args.output
 
-    print(f"\n[1] XSF lesen: {args.xsf}")
+    # -- 1. read XSF -------------------------------------------------
+    print(f"\n[1] reading XSF: {args.xsf}")
     data_3d, (ax_ang, by_ang, cz_ang), (nx, ny, nz) = read_xsf(args.xsf, args.order)
-    print(f"    Gitter:        {nx} x {ny} x {nz} Voxel")
-    print(f"    Einheitszelle: {ax_ang:.4f} x {by_ang:.4f} x {cz_ang:.4f} A")
-    print(f"    V (roh):       [{data_3d.min():.1f}, {data_3d.max():.1f}] Ry"
-          f" = [{data_3d.min()*RY_TO_V:.0f}, {data_3d.max()*RY_TO_V:.0f}] V")
+    print(f"    grid:       {nx} x {ny} x {nz} points")
+    print(f"    cell:       {ax_ang:.4f} x {by_ang:.4f} x {cz_ang:.4f} Å  "
+          f"({(nx-1)/ax_ang:.1f} x {(ny-1)/by_ang:.1f} x {(nz-1)/cz_ang:.1f} points/Å)")
+    print(f"    V_C (raw):  [{data_3d.min():.1f}, {data_3d.max():.3f}] Ry"
+          f" = [{data_3d.min()*RY_TO_V:.0f}, {data_3d.max()*RY_TO_V:.2f}] V")
 
-    print(f"\n[2] Nearest-Neighbor-Cutoff bei {args.cutoff:.0f} V = {cutoff_Ry:.1f} Ry")
+    # -- 2. nearest-neighbour cutoff ---------------------------------
+    print(f"\n[2] nearest-neighbour cutoff at -{args.cutoff:.0f} V = -{cutoff_Ry:.1f} Ry "
+          f"(stencil {args.stencil}, nn-value {args.nn_value})")
     n_over = int((data_3d < -cutoff_Ry).sum())
-    print(f"    Voxel unter -Schwellwert: {n_over} ({100*n_over/data_3d.size:.4f}%)")
-    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry)
-    print(f"    Ersetzt:  {n_replaced} Voxel")
-    print(f"    V (nach Cutoff): [{data_cut.min()*RY_TO_V:.0f}, {data_cut.max()*RY_TO_V:.0f}] V")
+    print(f"    voxels below -cutoff: {n_over} of {data_3d.size} ({100*n_over/data_3d.size:.4f}%)")
+    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry, args.stencil, args.nn_value)
+    print(f"    replaced:  {n_replaced} voxels")
+    print(f"    V_C (after cutoff): [{data_cut.min()*RY_TO_V:.0f}, {data_cut.max()*RY_TO_V:.2f}] V")
 
-    print(f"\n[3] cfg lesen: {args.cfg}")
+    # -- 3. normalisation --------------------------------------------
+    # Paper p. 397: shift so that the smallest value of V_s = -V_C is zero,
+    # i.e. subtract the largest V_C (vacuum / interstitial plateau).  A constant
+    # shift only adds a global phase in the multislice calculation, but it
+    # matters for any comparison with IAM potentials, which vanish in vacuum.
+    if args.no_normalize:
+        v_ref = 0.0
+        print(f"\n[3] normalisation skipped (--no-normalize)")
+    else:
+        v_ref = float(data_cut.max())
+        data_cut = data_cut - v_ref
+        print(f"\n[3] normalisation: V_C shifted by -{v_ref:.5f} Ry = -{v_ref*RY_TO_V:.3f} V "
+              f"so that min(V_s) = 0")
+
+    # -- 4. cfg ------------------------------------------------------
+    print(f"\n[4] reading cfg: {args.cfg}")
     cfg    = parse_cfg(args.cfg)
     layers = cfg['layers']
-    print(f"    {len(layers)} Layer, Gesamtdicke {cfg['total_z']:.3f} A,  Miller [{h}{k}{l}]")
+    print(f"    {len(layers)} layer(s), total thickness {cfg['total_z']:.3f} Å,  beam [{h}{k}{l}]")
 
-    print(f"\n[4] Projektion pro Layer ...")
+    # -- 5. projection per layer -------------------------------------
+    #
+    # unit chain:
+    #   proj_raw [Ry]  = sum of V_C over n_slices voxels
+    #   V_z [V·Å]      = -proj_raw * d_proj[Å] * RY_TO_V[V/Ry]     (V_s = -V_C)
+    #   V_z [1/Å]      = V_z [V·Å] / H2_2PI_ME [V·Å²]
+    # => to_kirk = d_proj * RY_TO_V / H2_2PI_ME  (no Bohr factor: XSF spans are in Å)
+    print(f"\n[5] projecting layer by layer ...")
     outs = []
     for ly in layers:
         proj_raw, d_proj, n_slices = project_layer(
             data_cut, (ax_ang, by_ang, cz_ang), (nx, ny, nz),
             (h, k, l), ly['z0'], ly['cz'])
         if proj_raw is None:
-            print(f"\n  Layer '{ly['label']}': keine Schichten, uebersprungen")
+            print(f"\n  layer '{ly['label']}': no voxel planes in "
+                  f"z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")
             continue
         to_kirk  = d_proj * RY_TO_V / H2_2PI_ME
         proj_yx  = -proj_raw * to_kirk   # V_s = -V_C
-        print(f"\n  Layer '{ly['label']}': {n_slices} Schichten, d={d_proj*1000:.1f} mA")
-        print(f"    V_proj: [{proj_yx.min():.4f}, {proj_yx.max():.4f}] 1/A")
+        print(f"\n  layer '{ly['label']}': z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å  "
+              f"({n_slices} planes, d = {d_proj*1000:.1f} mÅ)")
+        print(f"    V_z: [{proj_yx.min():.4f}, {proj_yx.max():.4f}] 1/Å"
+              f" = [{proj_yx.min()*H2_2PI_ME:.1f}, {proj_yx.max()*H2_2PI_ME:.1f}] V·Å")
         fname = f"{out_dir}/{ly['filename']}"
         write_ixchel_tiff(fname, proj_yx)
         outs.append(fname)
 
-    print(f"\nFertig -- {len(outs)} Datei(en) in '{out_dir}/'")
+    print(f"\nDone -- {len(outs)} file(s) in '{out_dir}/'")
 
 
 if __name__ == '__main__':
