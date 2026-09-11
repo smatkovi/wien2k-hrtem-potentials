@@ -1,0 +1,24 @@
+# LaTeX build products
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Generated data (never commit — see README "Test data")
+*.tif
+*.tiff
+*.npy
+*.xsf
+*.vcoul*
+*.clmsum*
