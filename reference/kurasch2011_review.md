@@ -11,6 +11,12 @@ re-validation. Test system: graphene, `~/wien2k_tests/Graphene` (CXY cell
 2.461 × 4.264 × 15.0 Å, C listed at (0, 1/6, 0) and (0, 5/6, 0), centring
 copies at (1/2, 2/3, 0) and (1/2, 1/3, 0)), WIEN2k 24.1.
 
+Second revision 2026-10-13: re-run on clean graphene data
+(`~/wien2k_tests/Graphene/lebF/Graphene`: Lebedev reduction off,
+scalar-relativistic valence, neutral IAM; see the README *Known issues*).
+Fig. 3 now follows the paper's definitions (§6); Fig. 2 (§7) and the
+mean-inner-potential check through the full route (§8) are added.
+
 ## 0. What the paper actually provides
 
 * The text on p. 397 and p. 399 (quoted below) is the **only** description of
@@ -22,6 +28,18 @@ copies at (1/2, 2/3, 0) and (1/2, 1/3, 0)), WIEN2k 24.1.
 * Fig. 2 was made with a single C atom in a 10 Å × 10 Å × 10 Å cell and a
   250 ppÅ line scan (p. 397). The paper does not say which potential Fig. 3
   was computed from.
+* `wien2venus.py` slices along x at x_i = i/n_x (n_x planes per period, no
+  duplicate) and samples each y–z plane with n_y × n_z points including both
+  ends (spacing L/(n−1)), NSHELL 3 3 3. Its optional shift (dx, dy, dz) moves
+  the grid off the nuclei; without it the grid starts at the cell origin, so
+  nuclei at rational positions can fall on voxels, the case the −50 kV cutoff
+  is made for (§6).
+* Supporting Information File 1 holds the WIEN2k convergence tests for ideal
+  graphene: 100 k-points suffice; between RKmax 7 and 9 the projected potential
+  changes by at most 0.06 %; GMAX 16 is recommended (default 12 within
+  0.25 %); a vacuum of 20–25 Å decouples the layers. Its total energies of the
+  two-atom cell (−152.40 … −152.416 Ry) are a direct check of an SCF: the
+  clean rerun gives −152.41590 Ry, the old SCF −152.45159 Ry.
 
 ## 1. Cutoff semantics
 
@@ -127,28 +145,58 @@ limitation of the paper's rule, not of the script.
 
 ## 6. Sanity target: reproduction of Fig. 3 on graphene
 
-Inputs: a `lapw5` x–z plane through a C nucleus (x at 600 ppÅ over ±0.117 Å,
-z over the full 15 Å at 30 ppÅ; `reference/lapw5_fig3/`) and 3D grids of
-75 × 127 × 451 points, chosen so that **all four** nuclei of the cell sit
-exactly on voxels (126/6 = 21, 74/2 = 37). Script: `src/plot_kurasch_fig3.py`;
-figure: `reference/kurasch_fig3_graphene.png`.
+Inputs: `lapw5c` x–z planes through a C nucleus (x at 600 or 3000 ppÅ over
+±0.117 Å, z over the full 15 Å at 30 ppÅ, nucleus on a sample;
+`reference/lapw5_fig3/`) and 3D grids of 75 × 127 × 451 points, chosen so
+that **all four** nuclei of the cell sit exactly on voxels (126/6 = 21,
+74/2 = 37). Script: `src/plot_kurasch_fig3.py`; figure:
+`reference/kurasch_fig3_graphene.png` (3000 ppÅ plane, clean data of
+2026-10-13).
 
-| quantity (central 30 ppÅ pixel, 15 Å column) | V·Å | 1/Å |
-|---|---|---|
-| WIEN2k voxel at the nucleus (r = r₀ = 1e-4 bohr) | 1.632 MV | |
-| no cutoff (paper Fig. 3 green peak ≈ 50 000) | **54 781** | 1144 |
-| nn cutoff, paper reading (highest, 6 neighbours), normalised | **446** | 9.31 |
-| nn cutoff, old reading (lowest, 6) | 444 | 9.28 |
-| nn cutoff, old reading (lowest, 26) | 410 | 8.56 |
-| "ideal": true mean of V_z over the pixel column (fine z integration of the spherical part inside the sphere) | **563** | 11.8 |
-| paper-style ideal: 2-D pixel mean of the green curve (30 ppÅ z sampling) | 642 | 13.4 |
-| Kirkland IAM (C), same pixel mean | 566 | 11.8 |
-| ratio ideal / cutoff (paper: "within a factor of three") | **1.26** (paper-style 1.44) | |
-| ratio no cutoff / ideal (paper: "up to two orders of magnitude") | **97** (paper-style 85) | |
+The curves follow the paper's definitions:
 
-The reproduction matches the paper: a peak of about 50 000 V·Å, within a
-factor of three after the cutoff, about two orders of magnitude without it.
-Near the core the true pixel mean agrees with the Kirkland value to 0.5 %.
+* green: V_z(x) = Σ_z V_s(x, z) dz with z at 30 ppÅ and x at the fine rate;
+* red: the same after the nn cutoff, applied for every lateral position on the
+  30 ppÅ grid laid through that column (neighbours at x ± 1/30 Å and
+  z ± 1/30 Å; the neighbours normal to the plane are farther from the nucleus
+  and never win). Only columns whose z = 0 voxel lies within 1.7 mÅ of the
+  nucleus exceed 50 kV, hence the narrow notch of the paper's figure;
+* blue: "the mean value of the green line at a resolution of 30 ppÅ"
+  (caption), i.e. the 1-D mean of the green curve over each pixel. The first
+  revision of this review read the boxes as 2-D pixel means (642 V·Å); the
+  box heights of the paper confirm the 1-D reading (pixel 2: paper ≈ 396,
+  1-D mean 392, 2-D mean 383 V·Å; pixel 1 below).
+
+The 1-D mean over the centre pixel does not converge with the lateral
+sampling of the green curve: its z = 0 sample grows like 1/|x| towards the
+core (finite only because lapw5 holds V constant below R0 = 1e-4 bohr), so the
+mean is 3570 / 1671 / 1519 / 1515 V·Å at 600 / 3000 / 6000 / 30 000 ppÅ
+(continuum limit 1518). The paper's ≈ 1660 V·Å corresponds to about 3000 ppÅ.
+The true mean of the projected potential over the pixel column (fine z
+integration of the spherical part inside the sphere) is 563 V·Å; the figure
+draws it as an outline.
+
+| quantity (central 30 ppÅ pixel, 15 Å column) | paper (read off Fig. 3) | V·Å | 1/Å |
+|---|---|---|---|
+| WIEN2k voxel at the nucleus (r = r₀ = 1e-4 bohr) | | 1.632 MV | |
+| no cutoff | ≈ 57 000 | **54 781** | 1144 |
+| nn cutoff, paper reading (highest, 6 neighbours), normalised | ≈ 453 | **446** (notch 446–450) | 9.31 |
+| nn cutoff, old reading (lowest, 6) | | 444 | 9.28 |
+| nn cutoff, old reading (lowest, 26) | | 410 | 8.56 |
+| blue box, pixel 1: 1-D mean of the green line | ≈ 1660 | **1671** (3000 ppÅ), 1518 (continuum) | |
+| blue box, pixel 2 | ≈ 396 | **392** | |
+| true pixel-column mean (not in the paper) | | **563** | 11.8 |
+| 2-D pixel mean of the green curve (first revision's "paper-style") | | 642 | 13.4 |
+| Doyle–Turner projected potential at the core | ≈ 386 | 390 | |
+| Kirkland IAM (C), pixel mean | | 566 | 11.8 |
+| ratio blue box / cutoff (paper: "within a factor of three") | ≈ 3.7 | **3.7** (3000 ppÅ box), 3.4 (continuum box); true mean: 1.26 | |
+| ratio no cutoff / true mean (paper: "up to two orders of magnitude") | | **97** | |
+
+The reproduction matches the paper. Against the paper's own box the cutoff
+value is a factor 3.4–3.7 low, against the true pixel-column mean only 1.26. Near
+the core the true pixel mean agrees with the Kirkland value to 0.5 %. The
+numbers are the same on the old graphene SCF: the core region is not affected
+by the Lebedev reduction or the relativistic mode.
 
 **3ddens and centred lattices.** WIEN2k 24.1 `3ddens` adds the centring
 translations only for F, B, CXZ and R lattices (`SRC_3ddens/3ddens.F:403`).
@@ -173,7 +221,59 @@ depends strongly on how far the nearest voxel is from the nucleus
 a nucleus on a voxel; check this per material (the script prints the number
 of flagged voxels).
 
-## 7. Summary of changes to `src/vcoul2tiff_ulm.py`
+## 7. Fig. 2: single carbon atom
+
+p. 397: a single C atom in a 10 Å × 10 Å × 10 Å cell, a line scan of the
+electrostatic potential at 250 ppÅ, shifted so that the smallest value is
+zero; the caption calls it the WIEN2k *starting* potential. Reproduced with
+`reference/fig2_C_single/C_single.struct` (P, a = 10 Å, C at the origin,
+RMT 1.33 bohr as in graphene, R0 = 1e-4 bohr, RELA), `init_lapw -b`, a checked
+`x dstart` and `x lapw0`; `src/plot_kurasch_fig2.py --vcoul` drives `lapw5c`
+for the line scan along x over half the cell (1251 points, 0–5 Å). Figure:
+`reference/kurasch_fig2_carbon.png`.
+
+| r [Å] | WIEN2k [V] | Kirkland [V] | dev. | Doyle–Turner [V] |
+|---|---|---|---|---|
+| 0.004 | 21 200 | 21 345 | −0.7 % | 1587 |
+| 0.020 | 3928 | 3928 | 0.0 % | 1530 |
+| 0.100 | 560.0 | 560.3 | −0.06 % | 668.6 |
+| 0.500 | 39.78 | 40.24 | −1.1 % | 39.51 |
+| 1.000 | 4.457 | 4.508 | −1.1 % | 4.421 |
+| 2.000 | 0.1056 | 0.1002 | +5.4 % | 0.0970 |
+
+As in the paper, WIEN2k and Kirkland agree closely, while Doyle–Turner is
+finite at the core (1589 V; paper inset ≈ 1550–1600 V) and falls off too fast
+beyond 2 Å. Beyond about 1.5 Å the WIEN2k values (< 1 V) depend on the
+normalisation constant and the periodic images; the small kink just below
+5 Å (half the cell) appears in the paper's figure as well. Doyle–Turner
+parameters: Doyle & Turner, Acta Cryst. A24, 390 (1968); Kirkland parameters:
+ixchel `dat/fparams.dat`.
+
+## 8. Mean inner potential of graphene through the full route
+
+p. 400: "For ideal graphene we find a difference in the mean inner potential
+of 15.5%."; p. 398: "The absolute differences between the DFT and IAM
+potentials are in the range of 10–30%". The DFT (SCF) and IAM (`x dstart`,
+checked) potentials of `Graphene/lebF/Graphene` were evaluated on the same
+75 × 127 × 451 grid and projected with `vcoul2tiff_ulm.py`:
+
+| quantity | DFT | IAM |
+|---|---|---|
+| vacuum level of V_C (shifted to V_s = 0) | +2.318 V | +2.815 V |
+| voxels replaced by the cutoff | 4 | 4 |
+| mean of V_z (TIFF) | 0.80334 1/Å = 38.46 V·Å | 0.95389 1/Å = 45.67 V·Å |
+| mean inner potential (15 Å cell) | 2.564 V | 3.045 V |
+
+Change DFT vs IAM: **−15.78 %** (paper 15.5 %). Without the cutoff the four
+nucleus voxels (−1.63 MV each) add 1.55 V to both means and the change drops
+to −10.45 %, so the cutoff matters for this number too. The relative
+difference (V_z,DFT − V_z,IAM)/V_z,IAM ranges from −30.6 % (bond region;
+−30.2 % and −30.0 % at the vertical and inclined bond centres, −22.0 % at the
+hexagon centre) to −1.7 % (at the nuclei), in line with the paper's 10–30 %. The
+vacuum is flat to 1e-5 V over ±1 Å around the cell centre, as the
+"smallest value = 0" normalisation of a slab requires.
+
+## 9. Summary of changes to `src/vcoul2tiff_ulm.py`
 
 1. `apply_nn_cutoff()`: replacement value = neighbour with the highest V_s;
    6-face stencil by default (`--nn-value`, `--stencil`); only voxels without
@@ -189,21 +289,25 @@ of flagged voxels).
    accepts both handednesses, so the matching triplet is documented in the
    docstring rather than changed.
 
-## 8. How to regenerate the Fig. 3 check
+## 10. How to regenerate the checks
 
 ```bash
-cd ~/wien2k_tests/Graphene
-cp <repo>/reference/lapw5_fig3/* .        # Graphene.in5_fig3, lapw5_fig3.def,
+cd ~/wien2k_tests/Graphene/lebF/Graphene  # README step 1 done: vcoul_DFT, vcoul_IAM; case.vcoul = vcoul_DFT
+cp <repo>/reference/lapw5_fig3/* .        # Graphene.in5_fig3(_3000), lapw5_fig3(_3000).def,
                                           # Graphene.in3d_ongrid, 3ddens_vcoul_ongrid.def
-# 1. high-resolution x-z plane through the nucleus (about 2 s)
-lapw5 lapw5_fig3.def                      # writes Graphene.rho_fig3 (Ry)
-# 2. 3D grid with all nuclei on voxels (lapw5grid handles the CXY centring)
-$PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul \
-    --grid 75 127 451 -o Graphene_vcoul_ongrid.xsf
-#    (3ddens 3ddens_vcoul_ongrid.def writes the same grid but misses the
-#     sphere contributions of the centring atoms)
-# 3. analysis and figure
-$PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
-$PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_ongrid.xsf \
-    --cfg Graphene_ixchel_001.cfg -o ulm_ongrid
+# 1. high-resolution x-z plane through the nucleus (600 ppÅ: 2 s, 3000 ppÅ: 25 s)
+lapw5c lapw5_fig3_3000.def                # writes Graphene.rho_fig3_3000 (Ry)
+# 2. 3D grids with all nuclei on voxels (lapw5grid handles the CXY centring)
+for k in DFT IAM; do
+  $PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul_$k \
+      --grid 75 127 451 -o Graphene_vcoul_${k}_ongrid.xsf
+  $PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_${k}_ongrid.xsf \
+      --cfg Graphene_ixchel_001.cfg -o ulm_${k}_001
+done
+#    (3ddens 3ddens_vcoul_ongrid.def writes the same grid from Graphene.vcoul
+#     but misses the sphere contributions of the centring atoms)
+# 3. Fig. 3 and the mean inner potential (§6, §8)
+$PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3_3000 kurasch_fig3_graphene.png
+$PY -c "import tifffile; d, i = (tifffile.imread(f'ulm_{k}_001/atompota.tif', key=1).mean() for k in ('DFT', 'IAM')); print(f'MIP change {100*(d/i-1):+.2f} %')"
+# 4. Fig. 2 (§7): README step 5e, case ~/wien2k_tests/C_single
 ```

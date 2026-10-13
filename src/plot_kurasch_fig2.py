@@ -3,18 +3,31 @@
 plot_kurasch_fig2.py — Reproduction of Kurasch et al. 2011, Fig. 2
 
 Radial line scan of the WIEN2k Coulomb potential through a single atom,
-compared with the Kirkland IAM potential (and optionally the bare Z/r).
+compared with the Doyle-Turner and Kirkland isolated-atom potentials and the
+bare Coulomb potential of the nucleus.
 
-Expected input: a WIEN2k vcoul XSF with EXACTLY ONE atom in a
-large cell (paper: 10x10x10 Å). If there are several atoms, the first one is taken.
+Paper (p. 397): "The WIEN2k potential was obtained by putting a single carbon
+atom into a 10 Å × 10 Å × 10 Å unit cell and calculating a linescan of the
+electrostatic potential with a resolution of 250 points per Angstrom (ppÅ).
+Far from the core, the WIEN2k potential approaches a non-zero constant value.
+In order to obtain the usual normalization, the potential was shifted (i.e.,
+smallest value was set to zero)."  The curve is the WIEN2k *starting*
+potential (Fig. 2 caption): case.vcoul from `x lapw0` on the `x dstart`
+density, before the first SCF cycle.
 
-The reader's axis order is detected automatically (as in vcoul2tiff_ulm4).
+Two input modes:
+  --vcoul/--struct  (paper): lapw5c line scan at --ppa points/Å (default 250)
+                    from the first atom along --axis over half the period
+  --xsf             line scans along the grid axes of a 3ddens/lapw5grid XSF
+                    (resolution of the grid; axis order detected automatically)
+Both are normalised as in the paper: V_s = -V_C, smallest value set to zero.
 
 Usage:
-    python3 plot_kurasch_fig2.py --xsf C_single_vcoul.xsf [--Z 6] \\
-        [--order auto|F|C] [--coulomb] [-o fig2.png]
+    python3 plot_kurasch_fig2.py --vcoul C_single.vcoul --struct C_single.struct [-o fig2.png]
+    python3 plot_kurasch_fig2.py --xsf C_single_vcoul.xsf [--order auto|F|C] [-o fig2.png]
 """
 import argparse, itertools, sys
+from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -24,27 +37,40 @@ import matplotlib.ticker as ticker
 RY_TO_V = 13.605693122994
 E2      = 14.399                 # e^2/(4 pi eps0) [eV*A] for the bare Coulomb potential
 
-# ── Kirkland IAM potential (abTEM parameters + scaling) ─────────────────
-# kappa from abtem/core/constants.py; the potential comes out in volts (eV/e).
-KAPPA = 0.0208865737082965
-# Raw parameters (abtem kirkland.json), layout [a(3), b(3), c(3), d(3)]:
+A0E     = 0.529177210903 * 14.399645   # a0*e [V*Å^2]
+
+# ── Kirkland isolated-atom potential (ixchel dat/fparams.dat) ───────────
+# fparams.dat layout per element: a1 b1 a2 b2 / a3 b3 c1 d1 / c2 d2 c3 d3
 _KIRK = {
-    'C': [[0.212080767, 0.199811865, 0.168254385],
-          [0.208605417, 0.208610186, 5.57870773],
-          [0.14204836,  0.363830672, 0.000835012],
-          [1.33311887,  3.80800263,  0.040398262]],
-    # further elements: add the rows from abtem kirkland.json here
+    'C': [[2.53148417e-01, 2.08761775e-01, 1.66953010e-01, 5.69804854e+00],
+          [1.60250013e-01, 2.08774166e-01, 1.41633354e-01, 1.34112859e+00],
+          [3.60244465e-01, 3.81665326e+00, 8.66192838e-04, 4.12204523e-02]],
+    # further elements: add the three rows from fparams.dat here
 }
 
 def kirkland_potential(r, symbol='C'):
-    """Isolated Kirkland atomic potential V(r) [V]. r in Angstrom."""
-    p = np.array(_KIRK[symbol])
-    a = np.pi * p[0] / KAPPA
-    b = 2.0 * np.pi * np.sqrt(p[1])
-    c = np.pi**1.5 * p[2] / p[3]**1.5 / KAPPA
-    d = np.pi**2 / p[3]
+    """Isolated Kirkland atomic potential V(r) [V], r in Å (Kirkland, Advanced
+    Computing in Electron Microscopy, eq. C.19)."""
+    p = np.array(_KIRK[symbol]).ravel()
+    a, b, c, d = p[[0, 2, 4]], p[[1, 3, 5]], p[[6, 8, 10]], p[[7, 9, 11]]
     r = np.asarray(r, float)
-    return sum(a[i]*np.exp(-b[i]*r)/r + c[i]*np.exp(-d[i]*r**2) for i in range(3))
+    return (2 * np.pi**2 * A0E * sum(a[i] / r * np.exp(-2 * np.pi * r * np.sqrt(b[i])) for i in range(3))
+            + 2 * np.pi**2.5 * A0E * sum(c[i] * d[i]**-1.5 * np.exp(-np.pi**2 * r**2 / d[i]) for i in range(3)))
+
+
+# ── Doyle-Turner isolated-atom potential ─────────────────────────────────
+# Doyle & Turner, Acta Cryst. A24, 390 (1968): f_e(s) = sum a_i exp(-b_i s^2),
+# s = sin(theta)/lambda [1/Å].  V(r) = 2 pi a0 e sum a_i (4 pi/b_i)^(3/2) exp(-4 pi^2 r^2/b_i)
+_DT = {
+    'C': [[0.7307, 1.1951, 0.4563, 0.1247], [36.9951, 11.2966, 2.8139, 0.3456]],
+}
+
+def doyle_turner_potential(r, symbol='C'):
+    """Isolated Doyle-Turner atomic potential V(r) [V], r in Å (finite at r = 0)."""
+    a, b = (np.array(v) for v in _DT[symbol])
+    r = np.asarray(r, float)
+    return 2 * np.pi * A0E * sum(a[i] * (4 * np.pi / b[i])**1.5 * np.exp(-4 * np.pi**2 * r**2 / b[i])
+                                 for i in range(4))
 
 
 # ── XSF reader with automatic axis detection + PRIMCOORD ────────────────
@@ -147,70 +173,115 @@ def radial_linescan(data, cell, atom_cart, prim=None):
     return r[o], v[o], ac, idx0
 
 
-def normalize_like_paper(r, v_ry):
-    """V_s = -V_C (volts), far field (smallest value) -> 0."""
-    v_v = -v_ry * RY_TO_V
-    far = v_v[r > r.max()*0.6]                  # outer region = plateau
-    v_shift = np.median(far) if far.size else v_v.min()
-    return v_v - v_shift
+def normalize_like_paper(v_ry):
+    """V_s = -V_C [V], shifted so that the smallest value is zero (paper p. 397)."""
+    v_v = -np.asarray(v_ry, float) * RY_TO_V
+    return v_v - v_v.min()
+
+
+# ── lapw5 line scan (paper mode) ─────────────────────────────────────────
+def lapw5_linescan(struct_path, vcoul_path, ppa=250.0, axis=0):
+    """V_C [Ry] along the lattice axis `axis` from the first atom over half the
+    period, ppa points per Å including both ends, evaluated by lapw5c.
+    Returns r [Å], V_C [Ry], atom position (fractional), lattice constants [Å]."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lapw5grid import BOHR, Lapw5Runner, read_struct
+    st = read_struct(struct_path)
+    if any(abs(x - 90.0) > 1e-6 for x in st['angles']):
+        sys.exit("Error: line scan mode needs an orthogonal cell")
+    L = np.array(st['abc_bohr']) * BOHR
+    pos = np.array(st['atoms'][0]['positions'][0], float)
+    length = L[axis] / 2
+    n = int(round(length * ppa)) + 1
+    end = pos.copy(); end[axis] += 0.5
+    other = pos.copy(); other[(axis + 1) % 3] += 0.25   # second, unused row of the lapw5 plane
+    run = Lapw5Runner(struct_path, vcoul_path, norm='val', nproc=1)
+    try:
+        plane = run.plane(tuple(pos), tuple(end), tuple(other), n, 2)
+    finally:
+        run.close()
+    return np.linspace(0.0, length, n), plane[:, 0], pos, L
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Reproduce Kurasch Fig. 2')
-    ap.add_argument('--xsf', required=True, help='WIEN2k vcoul XSF (1 atom, large cell)')
+    ap = argparse.ArgumentParser(description='Reproduce Kurasch et al. 2011, Fig. 2')
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument('--vcoul', help='case.vcoul of the starting potential (lapw5 line scan, paper mode)')
+    src.add_argument('--xsf', help='WIEN2k vcoul XSF (1 atom, large cell)')
+    ap.add_argument('--struct', help='case.struct (with --vcoul)')
+    ap.add_argument('--ppa', type=float, default=250.0, help='line scan points per Å (paper: 250)')
+    ap.add_argument('--axis', type=int, choices=[0, 1, 2], default=0, help='lattice axis of the line scan')
     ap.add_argument('--Z', type=int, default=6, help='Nuclear charge (default 6 = C)')
-    ap.add_argument('--symbol', default='C', help='Element for the Kirkland IAM')
+    ap.add_argument('--symbol', default='C', help='Element for the Kirkland and Doyle-Turner potentials')
     ap.add_argument('--order', choices=['auto','F','C'], default='auto')
-    ap.add_argument('--coulomb', action='store_true', help='additionally show the bare Z/r')
     ap.add_argument('-o', default='kurasch_fig2.png')
     args = ap.parse_args()
 
-    print(f"[1] XSF: {args.xsf}")
-    data, cell, shape, atoms, vecs = read_xsf(args.xsf, args.order)
-    print(f"    Grid {shape[0]}x{shape[1]}x{shape[2]}, "
-          f"cell {cell[0]:.2f}x{cell[1]:.2f}x{cell[2]:.2f} A, {len(atoms)} atom(s)")
-    if not atoms:
-        sys.exit("No atom in PRIMCOORD.")
-    atom = atoms[0]
-    print(f"    Atom Z={atom['Z']} at {np.round(atom['cart'],3)} A")
+    if args.vcoul:
+        if not args.struct:
+            sys.exit("Error: --vcoul needs --struct")
+        print(f"[1] lapw5c line scan of {args.vcoul} at {args.ppa:g} ppÅ along axis {args.axis}")
+        r, v_ry, pos, L = lapw5_linescan(args.struct, args.vcoul, args.ppa, args.axis)
+        print(f"    cell {L[0]:.3f} x {L[1]:.3f} x {L[2]:.3f} Å, atom at {pos}, "
+              f"{r.size} points over 0..{r[-1]:.3f} Å, V_C(0) = {v_ry[0]:.1f} Ry")
+        src_label = f'lapw5 line scan, {args.ppa:g} ppÅ'
+    else:
+        print(f"[1] XSF: {args.xsf}")
+        data, cell, shape, atoms, vecs = read_xsf(args.xsf, args.order)
+        print(f"    Grid {shape[0]}x{shape[1]}x{shape[2]}, "
+              f"cell {cell[0]:.2f}x{cell[1]:.2f}x{cell[2]:.2f} A, {len(atoms)} atom(s)")
+        if not atoms:
+            sys.exit("No atom in PRIMCOORD.")
+        atom = atoms[0]
+        print(f"    Atom Z={atom['Z']} at {np.round(atom['cart'],3)} A")
+        r, v_ry, ac, idx0 = radial_linescan(data, cell, atom['cart'], primitive_vectors(vecs))
+        print(f"    Line scans through {np.round(ac,3)} A (grid index {list(idx0)}, "
+              f"V = {data[idx0]:.1f} Ry)")
+        src_label = 'XSF grid line scans'
+    v = normalize_like_paper(v_ry)
+    print(f"    normalisation: V_s = -V_C shifted by {-(-np.asarray(v_ry) * RY_TO_V).min():+.4f} V "
+          f"(smallest value -> 0)")
 
-    r, v_ry, ac, idx0 = radial_linescan(data, cell, atom['cart'], primitive_vectors(vecs))
-    print(f"    Line scans through {np.round(ac,3)} A (grid index {list(idx0)}, "
-          f"V = {data[idx0]:.1f} Ry)")
-    v = normalize_like_paper(r, v_ry)
-
-    r_ref = np.logspace(-2, np.log10(min(cell)/2*0.95), 400)
+    r_ref = np.logspace(np.log10(2e-3), 1, 800)
     v_kirk = kirkland_potential(r_ref, args.symbol)
+    v_dt = doyle_turner_potential(r_ref, args.symbol)
+    v_coul = args.Z * E2 / r_ref
 
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(11, 5))
-    fig.suptitle('Radial potential — WIEN2k DFT vs Kirkland IAM\n'
-                 '(cf. Kurasch et al. 2011, Fig. 2)', fontsize=11)
-    for axp, (xlim, xscale, title) in zip(
-            [axL, axR],
-            [((0.01, 5.0), 'log',    'Log scale (as in Fig. 2)'),
-             ((0.0,  0.5), 'linear', 'Near-core region 0–0.5 Å')]):
-        m = (r > 5e-4) & (v > 0.05)
-        axp.semilogy(r[m], v[m], 'r.', ms=3, label='WIEN2k vcoul (DFT)')
-        axp.semilogy(r_ref, v_kirk, 'k-', lw=1.5, label='Kirkland IAM')
-        if args.coulomb:
-            axp.semilogy(r_ref, args.Z*E2/r_ref, 'b:', lw=1,
-                         alpha=.6, label=f'Coulomb Z={args.Z} (unscreened)')
-        axp.set_xscale(xscale); axp.set_xlim(xlim); axp.set_ylim(0.05, 1e4)
-        axp.set_xlabel('Distance from core [Å]'); axp.set_ylabel('Potential [V]')
-        axp.set_title(title, fontsize=9); axp.legend(fontsize=8)
-        axp.grid(True, which='both', alpha=.25)
-        axp.yaxis.set_major_formatter(ticker.LogFormatterMathtext())
+    # layout of the paper's Fig. 2: log-log main panel, linear inset 0-0.4 Å
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    m = r > 0
+    ax.loglog(r_ref, v_kirk, 'g-', lw=1.6, label='Kirkland')
+    ax.loglog(r[m], np.where(v[m] > 0, v[m], np.nan), 'r--', lw=1.6, label='WIEN2k')
+    ax.loglog(r_ref, v_dt, 'k-', lw=1.0, label='Doyle–Turner')
+    ax.loglog(r_ref, v_coul, 'b-', lw=0.7, label='Coulomb of nucleus')
+    ax.set_xlim(2e-3, 10); ax.set_ylim(1e-6, 1e5)
+    ax.set_xlabel('distance in Å'); ax.set_ylabel('potential in V')
+    ax.set_title(f'Single C atom in a 10 Å cell, WIEN2k starting potential ({src_label})\n'
+                 'cf. Kurasch et al. 2011, Fig. 2', fontsize=10)
+    ax.legend(fontsize=8, loc='upper right')
+    ax.yaxis.set_major_formatter(ticker.LogFormatterMathtext())
+    ins = ax.inset_axes([0.09, 0.08, 0.36, 0.5])
+    rl = np.linspace(1e-3, 0.4, 400)
+    mi = (r > 0) & (r <= 0.4)
+    ins.plot(rl, kirkland_potential(rl, args.symbol), 'g-', lw=1.4)
+    ins.plot(r[mi], v[mi], 'r--', lw=1.4)
+    ins.plot(rl, doyle_turner_potential(rl, args.symbol), 'k-', lw=0.9)
+    ins.plot(rl, args.Z * E2 / rl, 'b-', lw=0.7)
+    ins.set_xlim(0, 0.4); ins.set_ylim(0, 3000); ins.tick_params(labelsize=7)
     plt.tight_layout(); plt.savefig(args.o, dpi=150, bbox_inches='tight')
     print(f"\nSaved: {args.o}")
 
     # quantitative comparison at sample points
-    print("\n  r [Å]   WIEN2k [V]   Kirkland [V]   Dev.")
-    for rr in [0.1, 0.2, 0.5, 1.0, 1.5]:
-        j = np.argmin(np.abs(r - rr))
-        vk = kirkland_potential(r[j], args.symbol)
-        if v[j] > 0:
-            print(f"  {r[j]:5.2f}  {v[j]:10.1f}   {vk:10.1f}   "
-                  f"{100*(v[j]-vk)/vk:+6.1f}%")
+    print("\n  r [Å]    WIEN2k [V]   Kirkland [V]  dev.     Doyle-Turner [V]  dev.")
+    shown = set()
+    for rr in [0.004, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0]:
+        j = int(np.argmin(np.abs(r - rr)))
+        if r[j] <= 0 or j in shown:            # coarse XSF grids: no sample near rr
+            continue
+        shown.add(j)
+        vk = float(kirkland_potential(r[j], args.symbol))
+        vd = float(doyle_turner_potential(r[j], args.symbol))
+        print(f"  {r[j]:6.3f}  {v[j]:11.4f}  {vk:11.4f}  {100*(v[j]-vk)/vk:+7.2f}%  {vd:11.4f}  {100*(v[j]-vd)/vd:+8.1f}%")
 
 
 if __name__ == '__main__':

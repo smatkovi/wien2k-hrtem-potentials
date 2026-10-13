@@ -8,18 +8,29 @@ beam over the full cell at the production rate of 30 ppÅ, with the nucleus on
 a grid point in both directions.  The lapw5 input used for graphene is in
 reference/lapw5_fig3/ (units ATU -> Ry, NONORTHO).
 
+The figure follows the definitions of the paper (p. 397 and the caption):
+
 green : projected potential V_z(x) = sum_z V_s(x,z) dz at the fine lateral rate
-blue  : "ideal" pixel value = true mean of the projected potential over the
-        30 ppÅ pixel column (x, y inside the pixel, z over the cell).  Near the
-        core the 30 ppÅ z-sum (green) is dominated by the single z = 0 plane, so
-        the spherical L=0 part of V_s inside the muffin-tin sphere (from
-        case.vcoul) is integrated finely along z; the smooth remainder
+        with z at the production rate of 30 ppÅ ("a constant sampling rate of
+        30 ppÅ in the z-direction ..., but a much higher rate in the
+        perpendicular direction")
+red   : the same with the nearest-neighbour cutoff, applied for every lateral
+        position x on the 30 ppÅ grid through that column (neighbours at
+        x ± 1/30 Å and z ± 1/30 Å; "highest value", see vcoul2tiff_ulm.py,
+        apply_nn_cutoff).  Only columns whose z = 0 voxel lies within ~2 mÅ of
+        the nucleus exceed the cutoff, hence the narrow notch.
+blue  : "the mean value of the green line at a resolution of 30 ppÅ" (caption),
+        i.e. the 1-D mean of the green curve over each 30 ppÅ pixel.  The z = 0
+        sample of the green curve diverges like 1/|x| at the core (lapw5 holds
+        V constant below R0), so this mean depends on the lateral sampling; it
+        is evaluated in the continuum limit.
+        Outline (not in the paper): the true mean of the projected potential
+        over the pixel column (x, y inside the pixel, z over the cell).  Near
+        the core the spherical L=0 part of V_s inside the muffin-tin sphere
+        (from case.vcoul) is integrated finely along z; the smooth remainder
         (non-spherical part, interstitial) is taken from the lapw5 plane.
-        The paper-style value (2-D mean of the green curve) is printed as well.
-red   : V_z on the 30 ppÅ sub-grid after the nearest-neighbour cutoff, for both
-        readings of "highest value in the neighboring pixels" (see
-        vcoul2tiff_ulm.py, apply_nn_cutoff)
-black : Kirkland IAM projected potential of carbon for comparison
+black : Doyle–Turner (1968) projected potential of carbon (dotted, as in the
+        paper) and Kirkland's (dash-dot, for comparison)
 
 Usage:
     python3 plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png [case.vcoul case.struct]
@@ -202,7 +213,7 @@ print(f"ideal V_z(dx..4dx) = {np.round(vz_ideal(np.arange(1, 5) * dx), 0)} V*A "
 
 line_mean, blue, blue_green = [], [], []
 for lo, hi in edges:
-    m = (x >= lo - 1e-9) & (x < hi - 1e-9)
+    m = (np.round((x - lo) / dx) >= 0) & (np.round((x - hi) / dx) < 0)   # half-open pixel, in samples
     line_mean.append(Vz_green[m].mean())
     xx = np.linspace(lo, hi, 801)[:-1] + (hi - lo) / 1600
     yy = np.linspace(-px / 2, px / 2, 801)[:-1] + px / 1600
@@ -210,8 +221,38 @@ for lo, hi in edges:
     blue_green.append(vz_radial(np.sqrt(XX**2 + YY**2)).mean())
     blue.append(vz_ideal(np.sqrt(XX**2 + YY**2)).mean())
 print("1-D line means incl. r=0 sample [V*A]:", np.round(line_mean, 0))
-print("blue = ideal pixel-column means (fine z integration) [V*A]:        ", np.round(blue, 0))
-print("paper-style = 2-D pixel-area means of the green curve (30 ppA z) [V*A]:", np.round(blue_green, 0))
+print("ideal pixel-column means (fine z integration) [V*A]:              ", np.round(blue, 0))
+print("2-D pixel-area means of the green curve (30 ppA z) [V*A]:          ", np.round(blue_green, 0))
+
+# paper's blue boxes: 1-D mean of the green line over each pixel, continuum limit.
+# Between the lapw5 samples the green curve is the smooth remainder R (interpolated)
+# plus the z-sum of the spherical part f, which carries the 1/|x| spike of the z = 0
+# sample and is evaluated exactly (held constant below R0, as lapw5 does).
+zk_mt = (z - z[iz0])[np.abs(z - z[iz0]) < rmt_mt * BOHR]
+
+
+def green_cont(xx):
+    xx = np.atleast_1d(np.asarray(xx, float))
+    r = np.sqrt(xx[:, None]**2 + zk_mt[None, :]**2)
+    return np.interp(np.abs(xx), rR, R_pos) + f_sph(r).sum(axis=1) * dz
+
+
+print(f"continuous green curve reproduces the lapw5 samples to "
+      f"{np.max(np.abs(green_cont(x - x[ix0]) - Vz_green)):.1e} V*A")
+r0_A = r0_mt * BOHR
+line_cont = []
+for lo, hi in edges:
+    if lo < 0 < hi:                                   # centre pixel, mirror-symmetric
+        xs = np.concatenate([np.linspace(0, r0_A, 101), np.geomspace(r0_A, hi, 40001)[1:]])
+        line_cont.append(np.trapezoid(green_cont(xs), xs) / hi)
+    else:
+        xs = np.linspace(lo, hi, 20001)
+        line_cont.append(np.trapezoid(green_cont(xs), xs) / (hi - lo))
+print("paper's blue = 1-D mean of the green line per pixel, continuum limit [V*A]:", np.round(line_cont, 0))
+for rate in (600, 3000, 6000, 30000):
+    xs = np.arange(-int(round(px / 2 * rate)), int(round(px / 2 * rate)) + 1) / rate
+    xs = xs[(xs >= -px / 2 - 1e-12) & (xs < px / 2 - 1e-12)]
+    print(f"    centre pixel, green line sampled at {rate:5d} ppA: mean {green_cont(xs).mean():.0f} V*A")
 
 # ---------------------------------------------------------------- red: 30 ppA lateral subgrid + nn cutoff
 cols = np.arange(ix0 % sub, npx, sub)             # x = ..., -1/30, 0, 1/30, ...
@@ -254,6 +295,31 @@ ic = int(np.argmin(np.abs(xg)))
 print(f"no cutoff (30 ppA): centre pixel V_z = {Vz_nocut[ic]:.0f} V*A, ratio to ideal = {Vz_nocut[ic]/blue[0]:.1f} "
       f"(to paper-style = {Vz_nocut[ic]/blue_green[0]:.1f})")
 
+# ---------------------------------------------------------------- red as in the paper: fine lateral line with nn cutoff
+# For every lateral position x the 30 ppA grid is laid through that column: z
+# neighbours at z +- 1/30 A, x neighbours at x +- 1/30 A (sub fine samples away).
+# The y neighbours (normal to this plane, 1/30 A away) are not in the plane; they
+# never win, since the near x neighbour (1/30 A - |x| from the nucleus) is closer
+# than the y and z neighbours (sqrt(x^2 + (1/30 A)^2)).
+red_fine = Vz_green.copy()
+flag_cols = []
+for i in range(npx):
+    colv = Vs[i].copy()
+    for j in np.nonzero(colv > CUTOFF_V)[0]:
+        nb = [colv[(j - 1) % nz], colv[(j + 1) % nz]]
+        if i - sub >= 0:
+            nb.append(Vs[i - sub, j])
+        if i + sub < npx:
+            nb.append(Vs[i + sub, j])
+        colv[j] = max(v for v in nb if v <= CUTOFF_V)
+    if not np.array_equal(colv, Vs[i]):
+        red_fine[i] = colv.sum() * dz
+        flag_cols.append(i)
+print(f"red (fine): columns above {CUTOFF_V:.0f} V at x = {np.round((x[flag_cols] - x[ix0]) * 1000, 2)} mA "
+      f"-> V_z = {np.round(red_fine[flag_cols], 0)} V*A")
+print(f"centre pixel: paper's blue / red = {line_cont[0] / red_fine[ix0]:.2f}, "
+      f"ideal / red = {blue[0] / red_fine[ix0]:.2f}  (paper: 'within a factor of three')")
+
 # ---------------------------------------------------------------- Kirkland projected potential for C (reference)
 # fparams.dat layout per element: a1 b1 a2 b2 / a3 b3 c1 d1 / c2 d2 c3 d3
 KC = np.array([[float(v) for v in l.split()] for l in """
@@ -276,25 +342,41 @@ XX, YY = np.meshgrid(xx, xx)
 RR = np.sqrt(XX**2 + YY**2); RR[RR < 1e-6] = 1e-6
 print(f"Kirkland C: pixel mean over central 30 ppA pixel = {kirk_vz(RR).mean():.0f} V*A; line mean over x-pixel at y=0: {kirk_vz(np.abs(xx[np.abs(xx)>1e-6])).mean():.0f} V*A")
 
-# ---------------------------------------------------------------- plot
+# ---------------------------------------------------------------- Doyle-Turner projected potential for C (paper's reference)
+# Doyle & Turner, Acta Cryst. A24, 390 (1968): f_e(s) = sum a_i exp(-b_i s^2), s = sin(theta)/lambda [1/A];
+# projected: V_z(r) = 8 pi^2 a0 e sum (a_i / b_i) exp(-4 pi^2 r^2 / b_i)
+DT_A = np.array([0.7307, 1.1951, 0.4563, 0.1247])
+DT_B = np.array([36.9951, 11.2966, 2.8139, 0.3456])
+
+
+def dt_vz(r):
+    r = np.asarray(r, float)
+    return 8 * np.pi**2 * A0E * sum(DT_A[i] / DT_B[i] * np.exp(-4 * np.pi**2 * r**2 / DT_B[i]) for i in range(4))
+
+
+print(f"Doyle-Turner C: V_z(0) = {float(dt_vz(0.0)):.0f} V*A")
+
+# ---------------------------------------------------------------- plot (layout of the paper's Fig. 3)
 fig, ax = plt.subplots(figsize=(7.5, 5))
-for (lo, hi), val in zip(edges, blue):
-    ax.add_patch(plt.Rectangle((lo, 100), hi - lo, val - 100, color='#6fb7ff', alpha=0.6, zorder=0))
-ax.semilogy(x, Vz_green, 'g-', lw=1.2, label='no cutoff (600 ppÅ lateral, 30 ppÅ z)')
-ax.step(np.append(xg - px / 2, xg[-1] + px / 2), np.append(results['max'], results['max'][-1]), where='post',
-        color='r', lw=1.4, label="nn cutoff 50 kV, 'highest' = largest |V| neighbour")
-ax.step(np.append(xg - px / 2, xg[-1] + px / 2), np.append(results['min'], results['min'][-1]), where='post',
-        color='m', lw=1.0, ls='--', label="nn cutoff 50 kV, smallest |V| neighbour (old code)")
-rr = np.linspace(1e-3, 0.12, 300)
-ax.semilogy(rr, kirk_vz(rr), 'k:', lw=1.2, label='Kirkland IAM projected (C)')
+for k, ((lo, hi), val, ideal) in enumerate(zip(edges, line_cont, blue)):
+    ax.add_patch(plt.Rectangle((lo, 100), hi - lo, val - 100, color='#6fb7ff', alpha=0.55, zorder=0,
+                               label='mean of the green line per 30 ppÅ pixel' if k == 0 else None))
+    ax.add_patch(plt.Rectangle((lo, 100), hi - lo, ideal - 100, fill=False, ec='#1f4e9a', ls='--', lw=1.0,
+                               zorder=1, label='true pixel-column mean (not in the paper)' if k == 0 else None))
+xr = x - x[ix0]
+ax.semilogy(xr, Vz_green, 'g-', lw=1.2, label='no cutoff')
+ax.semilogy(xr, red_fine, 'r-', lw=1.2, label=f'nn cutoff {CUTOFF_V:.0f}')
+rr = np.linspace(-0.02, 0.09, 1101)
+ax.semilogy(rr, dt_vz(np.abs(rr)), 'k:', lw=1.2, label='DT projected')
+ax.semilogy(rr, kirk_vz(np.maximum(np.abs(rr), 1e-4)), color='0.45', ls='-.', lw=0.9, label='Kirkland projected')
 for k in range(1, 4):
-    ax.axvline((2 * k - 1) * px / 2, color='gray', lw=0.6, ls=':')
-    ax.text((2 * k - 1) * px / 2, 115, f'pixel{k}', ha='center', fontsize=8)
-ax.set_xlim(-0.02, 0.09); ax.set_ylim(100, 2e5)
-ax.text(0.088, 1.5e4, f"centre pixel: no cutoff {Vz_nocut[ic]:.0f}, nn cutoff {results['max'][ic]:.0f}, "
-        f"pixel-area mean {blue[0]:.0f} V·Å", fontsize=7.5, va='top', ha='right')
-ax.set_xlabel('distance from core [Å]'); ax.set_ylabel('projected potential [V·Å]')
-ax.set_title('Graphene C, WIEN2k vcoul via lapw5 — cf. Kurasch et al. 2011 Fig. 3', fontsize=10)
-ax.legend(fontsize=7, loc='upper right')
+    ax.axvline((2 * k - 1) * px / 2, color='k', lw=0.6, ls=':')
+    ax.text((2 * k - 1) * px / 2, 1.08e5, f'pixel{k}', ha='center', va='bottom', fontsize=9)
+ax.set_xlim(-px / 2 - 0.0008, 0.09); ax.set_ylim(100, 1e5)
+ax.text(0.088, 2.2e3, f"centre pixel [V·Å]: no cutoff {Vz_green[ix0]:.0f}, nn cutoff {red_fine[ix0]:.0f},\n"
+        f"line mean {line_cont[0]:.0f}, true pixel-column mean {blue[0]:.0f}", fontsize=7.5, va='top', ha='right')
+ax.set_xlabel('distance from core in Å'); ax.set_ylabel('projected potential in V·Å')
+ax.set_title('Graphene, WIEN2k vcoul via lapw5 — cf. Kurasch et al. 2011, Fig. 3', fontsize=10, pad=18)
+ax.legend(fontsize=7.5, loc='upper right')
 fig.tight_layout(); fig.savefig(out_png, dpi=150)
 print("saved", out_png)

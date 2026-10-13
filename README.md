@@ -29,6 +29,11 @@ the difference, so ΔV is finite everywhere and needs no cutoff.
 > grid); `compare_all_subsliced.py` misregistered the unit cell. The earlier
 > Si cross-check r = 0.999 was dominated by the Kirkland term and did not test
 > ΔV. Details: `reference/kurasch2011_review.md` and the git history.
+>
+> **Graphene data before 2026-10-13** additionally came from a non-relativistic
+> valence calculation (mode line of `Graphene.struct`) and from the
+> Lebedev-reduced lapw0; the clean rerun is `~/wien2k_tests/Graphene/lebF/Graphene`
+> (see *Known issues*).
 
 ## Routes
 
@@ -36,7 +41,7 @@ the difference, so ΔV is finite everywhere and needs no cutoff.
 |---|---|---|
 | `src/vcoul2tiff.py` | `case.vcoul_DFT − case.vcoul_IAM`, evaluated by **lapw5** (`RHO SUB`) on a grid over each layer, integrated along the beam | **main route**, validated (see below) |
 | `src/xsf2tiff_dwFactor.py` | Δρ = ρ_DFT − ρ_IAM from XSF densities, FFT Poisson solver, line integral | independent cross-check; agrees with the main route (Rutile [001]: r = 1.0000) |
-| `src/vcoul2tiff_ulm.py` | no ΔV: total `vcoul` on a grid with the nearest-neighbour cutoff of Kurasch et al. (2011) | faithful re-implementation for comparison |
+| `src/vcoul2tiff_ulm.py` | no ΔV: total `vcoul` on a grid with the nearest-neighbour cutoff of Kurasch et al. (2011) | faithful re-implementation for comparison; reproduces the paper's graphene numbers and Figs. 2–3 (2026-10-13) |
 
 Both ΔV routes share the cfg parser, the layer depth windows and the Kirkland
 term (`kirkland_layer`, a port of ixchel's `atompot` including subslicing and
@@ -63,7 +68,10 @@ Tools:
 * `src/run_subsliced.sh` — runs `xsf2tiff_dwFactor.py` and the comparison for
   Rutile, Si and Graphite_ort.
 * `src/plot_kurasch_fig2.py`, `src/plot_kurasch_fig3.py` — reproductions of
-  Figs. 2 and 3 of the paper.
+  Figs. 2 and 3 of the paper with the paper's definitions (Fig. 2: lapw5c line
+  scan of the starting potential of a single atom at 250 ppÅ; Fig. 3: fine
+  lateral line with the cutoff notch, boxes = mean of the green line), plus
+  Doyle–Turner and Kirkland references; inputs in `reference/`.
 
 ## Requirements
 
@@ -93,8 +101,15 @@ normalisation). Edit it with an editor if necessary.
 the Lebedev-point reduction of the patched lapw0 is on by default and distorts
 the density of sites without local mirror planes (graphene: 6.9 % between
 equivalent bonds), so put a file `inlebreduce` containing `F` into the case
-directory *before* `run_lapw`; and WIEN2k 24.1 `dstart` picks its code path at
-random (uninitialised `tau_mode`), so check every run with `check_dstart.py`.
+directory *before* `run_lapw` (`grep -c LEBREDUCE case.output0` must give 0);
+and WIEN2k 24.1 `dstart` picks its code path at random (uninitialised
+`tau_mode`), so check every run with `check_dstart.py`.
+
+**Mode line of `case.struct`.** WIEN2k reads the calculation mode from columns
+14–17 of line 3. Use `MODE OF CALC=RELA unit=bohr`; a bare `RELA` at the start of
+the line is read as blank, and lapw1/lapw2 then treat the valence states
+non-relativistically (`case.output2` prints `MODE OF CALCULATION IS = ` without
+`RELA`). Check `grep 'MODE OF CALCULATION' case.output2` after the first cycle.
 
 ```bash
 cd ~/wien2k_tests/Graphene
@@ -216,18 +231,63 @@ $PY <repo>/src/xsf2tiff_dwFactor.py --dft Graphene_DFT_rho.xsf --iam Graphene_IA
 Compare `wien2k_001` and `wien2k_rho_001` after removing the means (the
 Poisson route has zero-mean ΔV by construction).
 
-**e) Kurasch et al. route and Fig. 3.**
+**e) Kurasch et al. route: both potentials, mean inner potential, Figs. 2 and 3.**
+The paper processes the DFT and the IAM potential identically (30 ppÅ grid,
+cutoff, normalisation, projection); its graphene check is the change of the
+mean inner potential, 15.5 % (p. 400).
 
 ```bash
-cd ~/wien2k_tests/Graphene                 # case.vcoul holds the SCF potential (step 1)
-$PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul_DFT --grid 75 127 451 -o Graphene_vcoul.xsf
-$PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul.xsf --cfg Graphene_ixchel_001.cfg -o wien2k_ulm_001
+cd ~/wien2k_tests/Graphene/lebF/Graphene   # step 1 done; case.vcoul holds the SCF potential
+for k in DFT IAM; do
+  $PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul_$k --grid 75 127 451 -o Graphene_vcoul_${k}_ongrid.xsf
+  $PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_${k}_ongrid.xsf --cfg Graphene_ixchel_001.cfg -o ulm_${k}_001
+done
+$PY -c "import tifffile; d, i = (tifffile.imread(f'ulm_{k}_001/atompota.tif', key=1).mean() for k in ('DFT', 'IAM')); print(f'MIP change {100*(d/i-1):+.2f} %')"
 cp <repo>/reference/lapw5_fig3/* .
-lapw5 lapw5_fig3.def                       # x-z plane through a nucleus, reads Graphene.vcoul
-$PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
+lapw5c lapw5_fig3_3000.def                 # x-z plane through a nucleus, 3000 ppÅ lateral, reads Graphene.vcoul
+$PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3_3000 kurasch_fig3_graphene.png
 ```
 
+The 75 × 127 × 451 grid puts all four nuclei on voxels; both runs must report
+`replaced: 4 voxels`. The TIFFs hold a preview (page 0), the data in 1/Å
+(page 1) and metadata (page 2), hence `key=1`. `lapw5_fig3.def` gives the same
+plane at 600 ppÅ.
+
+Fig. 2 needs its own case: one C atom in a 10 Å cube and its *starting*
+potential (before the first SCF cycle):
+
+```bash
+mkdir -p ~/wien2k_tests/C_single && cd ~/wien2k_tests/C_single
+cp <repo>/reference/fig2_C_single/C_single.struct . && echo F > inlebreduce
+init_lapw -b -rkmax 7.0 -numk 1 -vxc 13    # then case.in0 line 2: NR2V -> R2V
+x dstart && $PY <repo>/src/check_dstart.py C_single      # repeat until PASS
+x lapw0 && cp C_single.vcoul C_single.vcoul_start
+$PY <repo>/src/plot_kurasch_fig2.py --vcoul C_single.vcoul_start --struct C_single.struct -o kurasch_fig2_carbon.png
+```
+
+## Validation of the Kurasch route (2026-10-13)
+
+Clean graphene (`~/wien2k_tests/Graphene/lebF/Graphene`: `inlebreduce` = `F`,
+scalar-relativistic, RKmax 7, 11 × 11 × 1 k, GMAX 16, PBE, 15 Å cell, neutral
+IAM) and the single C atom (`~/wien2k_tests/C_single`). Paper values for Fig. 3
+are read off the figure.
+
+| check | result | paper |
+|---|---|---|
+| SCF total energy | −152.41590 Ry | SI File 1: −152.4134 … −152.4152 Ry |
+| density / V_z at vertical vs inclined bond centre | 0.12 % / 1.6e-3 1/Å (IAM: 0.07 % / 0.6e-3 1/Å) | equal (hexagonal) |
+| nucleus voxels replaced by the cutoff, DFT / IAM | 4 / 4 | — |
+| mean inner potential change, DFT vs IAM | −15.78 % (without the cutoff −10.45 %) | 15.5 % |
+| (V_z,DFT − V_z,IAM) / V_z,IAM over the cell | −30.6 … −1.7 % | 10–30 % |
+| Fig. 3, centre column without / with the cutoff | 54 781 / 446 V·Å | ≈ 57 000 / ≈ 453 V·Å |
+| Fig. 3, mean of the green line, pixel 1 / pixel 2 | 1671 (green sampled at 3000 ppÅ) / 392 V·Å | ≈ 1660 / ≈ 396 V·Å |
+| Fig. 3, Doyle–Turner projected at the core | 390 V·Å | ≈ 386 V·Å |
+| Fig. 2, starting potential vs Kirkland | ≤ 0.3 % at 0.01–0.2 Å, ≤ 1.2 % up to 1 Å, +4…6 % at 1.5–3 Å (< 1 V) | "very good agreement" |
+| Fig. 2, Doyle–Turner at the core | 1589 V | ≈ 1550–1600 V |
+
 ## Validation (2026-09-11, graphene CXY and rutile P4₂/mnm)
+
+Graphene rows use the old SCF (Lebedev reduction on, non-relativistic valence).
 
 | check | result |
 |---|---|
@@ -239,7 +299,7 @@ $PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png
 | ΔV main route vs Poisson route, rutile [001] (3ddens densities) | r = 1.0000, rms difference 0.4 % of the ΔV rms |
 | ΔV main route vs Poisson route, graphene (lapw5grid densities) | r = 1.0000, rms difference 0.2 % |
 | graphene ΔV symmetry (mirrors / centring shift) | 2e-7 / 1e-4 1/Å |
-| graphene 3-fold symmetry (vertical vs inclined bond centres) | broken by 5.4e-3 1/Å — in the SCF input, not in the scripts (see Known issues) |
+| graphene 3-fold symmetry (vertical vs inclined bond centres) | broken by 5.4e-3 1/Å — in the SCF input, not in the scripts (see Known issues); 1.6e-3 1/Å after the rerun |
 | ΔV convergence against dz = 5 mÅ: dz 50 / 25 / 100 mÅ; 25 mÅ lateral aliasing | 2.7e-5 / 1.2e-5 / 1.4e-4 1/Å; 6e-6 1/Å |
 | `ixchel main` transmission vs exp(iσV) | 3.5e-8 rad |
 | graphene mean inner potential, DFT vs Kirkland (neutral IAM, vacuum-referenced) | −15.8 % (paper: 15.5 %) |
@@ -253,6 +313,12 @@ cfgs for 001/100/110), `Graphite_ort` (P), `Graphene` (CXY), plus `FeF2`,
 none of that is committed (`.gitignore`). ixchel cfgs sit in sub-directories,
 e.g. `~/wien2k_tests/Rutile/ixchel_110/Rutile_ixchel_110.cfg`.
 
+The clean graphene rerun is `~/wien2k_tests/Graphene/lebF/Graphene` (the case
+directory must carry the case name), with the commands and results in
+`~/wien2k_tests/Graphene/lebF/RUN.md`; the earlier non-relativistic results
+are kept there as `*_nrel`. The single C atom of Fig. 2 is
+`~/wien2k_tests/C_single`.
+
 ## Known issues and open items
 
 * **WIEN2k 24.1 `dstart` is non-deterministic.** `tau_mode` is declared in
@@ -264,7 +330,8 @@ e.g. `~/wien2k_tests/Rutile/ixchel_110/Rutile_ixchel_110.cfg`.
   regenerate the existing `vcoul_IAM` files. The lateral ΔV structure hardly
   changes (≤ 0.003 1/Å); the offset and the mean inner potential do. The
   permanent fix is `tau_mode=.false.` in `init.F` (not applied: the WIEN2k tree
-  is left untouched).
+  is left untouched). The graphene IAM was regenerated on 2026-10-13 in
+  `Graphene/lebF/Graphene` (2 of 4 `x dstart` runs failed the check).
 * **Lebedev-point reduction in the patched lapw0** (local commits `0c8e4d9`,
   `e2356a4`, on by default): `SRC_lapw0/xcpot1.f` keeps only the Lebedev
   points with local y ≥ 0 and z ≥ 0 for every non-cubic site, i.e. it assumes
@@ -279,7 +346,22 @@ e.g. `~/wien2k_tests/Rutile/ixchel_110/Rutile_ixchel_110.cfg`.
   of Rutile and Graphite_ort also print it in `output0`. Whether a site is
   affected depends on its site symmetry. Rerun the SCFs with
   `inlebreduce` = `F`, or restrict the reduction to sites that have those
-  mirrors.
+  mirrors. Done for graphene on 2026-10-13 (`Graphene/lebF/Graphene`, density
+  difference 0.12 %); Rutile, Si, FeF2 and Graphite_ort are still to be rerun.
+* **Mode line of `Graphene.struct`.** Line 3 read `RELA` in columns 1–4, but
+  WIEN2k reads the mode from columns 14–17 (`(13X,A4)`), so lapw1 and lapw2
+  treated the valence states of every graphene SCF before 2026-10-13
+  non-relativistically, including the −15.8 % of the 2026-09-11 validation
+  (lstart treats a blank mode as relativistic, lcore ignores the mode). Fixed in
+  `Graphene/lebF/Graphene` (`MODE OF CALC=RELA unit=bohr`): total energy
+  −152.40946 → −152.41590 Ry, mean inner potential change −15.76 % → −15.78 %,
+  Fig. 3 numbers unchanged. `Si/Si.struct` has `RELA` after 13 spaces and is
+  read correctly; the other test structs use the standard line.
+* **Open: residual hexagonal asymmetry of the graphene SCF.** After the rerun
+  V_z still differs by 1.6e-3 1/Å between the vertical and inclined bond
+  centres, about 3× the IAM value (0.6e-3 1/Å). Not explained yet; a
+  hexagonal k-mesh instead of the rectangular 11 × 11 × 1 mesh of the CXY cell
+  was only tried with the Lebedev reduction on.
 * **Graphite_ort is invalid at the struct level.** Symmetry operations 5–8 of
   `Graphite_ort.struct` map four atoms onto empty sites (the z+1/2 translation
   is missing), and its RMT 1.34 does not match `Graphite_ort.rsp` (dstart's ZZ
