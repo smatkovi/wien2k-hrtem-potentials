@@ -28,9 +28,11 @@ for potentials and valence densities, norm='tot' for case.clmsum (lapw5 then
 divides the L=0 component by sqrt(4 pi), as 3ddens does for *sum files).
 
 Command line (XSF in the 3ddens general-grid convention: n points per axis
-spanning the conventional cell including both end planes, x fastest, Å):
+spanning the conventional cell including both end planes, x fastest, Å;
+one period therefore has n-1 points, choose n-1 so that the nuclei lie on
+grid points, e.g. 75 127 451 = 74 x 126 x 450 periodic for graphene):
 
-    python3 lapw5grid.py --struct case.struct --clm case.vcoul --grid 74 128 450 -o case_vcoul.xsf
+    python3 lapw5grid.py --struct case.struct --clm case.vcoul --grid 75 127 451 -o case_vcoul.xsf
     python3 lapw5grid.py --struct case.struct --clm case.vcoul_DFT --sub case.vcoul_IAM --grid ... -o dV.xsf
     python3 lapw5grid.py --struct case.struct --clm case.clmsum --norm tot --grid ... -o rho.xsf
 

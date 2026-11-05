@@ -3,7 +3,8 @@
 vcoul2tiff_ulm.py — re-implementation of the Kurasch et al. (2011) route
 
 Projects the total WIEN2k Coulomb potential (case.vcoul exported to XSF with
-3ddens) onto ixchel-compatible TIFFs following the recipe of
+lapw5grid.py, or with 3ddens for lattices other than CXY/CYZ) onto
+ixchel-compatible TIFFs following the recipe of
 
     S. Kurasch, J. C. Meyer, D. Künzel, A. Groß, U. Kaiser,
     "Simulation of bonding effects in HRTEM images of light element materials",
@@ -13,7 +14,7 @@ as literally as the paper allows.  The script exists as a comparison for
 vcoul2tiff.py; deviations from the paper are bugs, not improvements.
 
 Method (paper p. 397-399):
-  1. Read the 3D potential from XSF                 [Ry, span vectors in Å]
+  1. Read the 3D potential from XSF  [Ry, the vectors that span the grid are in Å]
   2. Nearest-neighbour cutoff (p. 397): "Whenever a value in the 3D potential
      is higher than some cutoff value, we change this value to the highest
      value in the neighboring pixels."  Cutoff used in the paper: -50 kV (p. 399).
@@ -32,7 +33,7 @@ Sign convention:
   pixels" means the neighbour with the largest V_s, i.e. the most negative V_C.
   See apply_nn_cutoff() for the two readings and their consequences.
 
-XSF conventions (3ddens):
+XSF conventions (3ddens general grid, also written by lapw5grid.py):
   General grid: n points span 0..L inclusive, the last plane is the periodic
   image of the first.  The duplicate end planes are dropped along all three
   axes right after reading, so cutoff (periodic wrap), normalisation and
@@ -122,8 +123,9 @@ def _reshape_xsf(vals, nx, ny, nz, order):
 
 def read_xsf(path, order='auto'):
     """
-    Read a 3D data grid from an XSF file written by WIEN2k 3ddens.
-    Span vectors are in Å, values in Ry.
+    Read a 3D data grid from an XSF file written by WIEN2k 3ddens or by
+    lapw5grid.py (same general-grid convention).  The vectors that span the
+    grid are in Å, values in Ry.
 
     Returns: data [nx,ny,nz] (Ry), (ax,by,cz) [Å], (nx,ny,nz)
     """
