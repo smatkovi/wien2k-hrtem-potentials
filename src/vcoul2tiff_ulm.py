@@ -121,7 +121,7 @@ def _reshape_xsf(vals, nx, ny, nz, order):
     return dC, 'C'
 
 
-def read_xsf(path, order='auto'):
+def read_xsf(path, order='auto'): #step 1 in order of execution
     """
     Read a 3D data grid from an XSF file written by WIEN2k 3ddens or by
     lapw5grid.py (same general-grid convention).  The vectors that span the
