@@ -36,6 +36,20 @@ grid points, e.g. 75 127 451 = 74 x 126 x 450 periodic for graphene):
     python3 lapw5grid.py --struct case.struct --clm case.vcoul_DFT --sub case.vcoul_IAM --grid ... -o dV.xsf
     python3 lapw5grid.py --struct case.struct --clm case.clmsum --norm tot --grid ... -o rho.xsf
 
+Other cells (--edges, --origin): by default the grid spans the conventional
+cell.  --edges gives the three grid edge vectors and --origin the grid origin
+(default 0 0 0; fractions like 1/2 are accepted), both in fractional
+coordinates of the conventional cell, so that e.g. a hexagonal (H) case can be
+sampled on its rectangular (orthohexagonal) cell a1, a1 + 2 a2, the cell that
+crystruct --ixchel "1 0 0  1 2 0  0 0 1" writes:
+
+    python3 lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul --grid 75 127 451 \\
+        --edges 1 0 0  1 2 0  0 0 1 -o Graphene_vcoul_ongrid.xsf
+
+The edges must be lattice translations, otherwise the last planes are not
+periodic images of the first (a warning is printed).  The XSF then lists the
+grid cell as the crystal cell.
+
 Requires lapw5c on PATH ($WIENROOT) and numpy.
 """
 
@@ -288,30 +302,58 @@ class Lapw5Runner:
 # XSF output (3ddens-compatible general grid)
 # ═══════════════════════════════════════════════════════════════
 
-def write_xsf(path, data, struct, comment):
-    conv = conventional_vectors_ang(struct)
-    atoms = []
+def is_lattice_translation(vec, lattice, tol=1e-6):
+    """True if vec (fractional, conventional cell) is a translation of the lattice."""
+    v = np.asarray(vec, float)
+    return any(np.all(np.abs((v - np.array(t)) - np.round(v - np.array(t))) < tol)
+               for t in centring_translations(lattice))
+
+
+def atoms_in_cell(struct, origin, edges, tol=1e-6):
+    """(Z, fractional position in the conventional cell) of all atoms inside the
+    cell origin + u e0 + v e1 + w e2, 0 <= u, v, w < 1."""
+    origin = np.asarray(origin, float)
+    E = np.array(edges, float)
+    Einv = np.linalg.inv(E)
+    corners = np.array([origin + E.T @ np.array(c) for c in np.ndindex(2, 2, 2)])
+    lo = np.floor(corners.min(axis=0)).astype(int) - 1
+    hi = np.ceil(corners.max(axis=0)).astype(int) + 1
+    out = []
     for at in struct['atoms']:
         for pos in at['positions']:
             for t in centring_translations(struct['lattice']):
-                f = (np.array(pos) + np.array(t)) % 1.0
-                atoms.append((int(round(at['Z'])), f @ conv))
+                f0 = (np.array(pos) + np.array(t)) % 1.0
+                for n in np.ndindex(*(hi - lo + 1)):
+                    f = f0 + lo + np.array(n)
+                    g = (f - origin) @ Einv
+                    if np.all(g > -tol) and np.all(g < 1 - tol):
+                        out.append((int(round(at['Z'])), f))
+    return out
+
+
+def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (0, 1, 0), (0, 0, 1))):
+    """origin, edges: grid origin and edge vectors in fractional coordinates of
+    the conventional cell (default: the conventional cell itself)."""
+    conv = conventional_vectors_ang(struct)
+    cell = np.array(edges, float) @ conv               # Cartesian grid vectors [Å] (rows)
+    o_cart = np.asarray(origin, float) @ conv
+    atoms = [(z, f @ conv) for z, f in atoms_in_cell(struct, origin, edges)]
     nx, ny, nz = data.shape
     with open(path, 'w') as f:
         f.write(f"# XSF-File prepared by lapw5grid.py (values from lapw5)\n# {comment}\n")
         f.write("CRYSTAL\nPRIMVEC\n")
-        for v in conv:
+        for v in cell:
             f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
         f.write("CONVVEC\n")
-        for v in conv:
+        for v in cell:
             f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
         f.write("PRIMCOORD\n%5d    1\n" % len(atoms))
         for z, r in atoms:
             f.write("%3d%16.8E%16.8E%16.8E\n" % (z, *r))
         f.write("BEGIN_BLOCK_DATAGRID3D\n lapw5grid\nDATAGRID_3D_GRID\n")
         f.write(f"{nx} {ny} {nz}\n")
-        f.write("%16.8E%16.8E%16.8E\n" % (0.0, 0.0, 0.0))
-        for v in conv:
+        f.write("%16.8E%16.8E%16.8E\n" % tuple(o_cart))
+        for v in cell:
             f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
         flat = data.reshape(-1, order='F')             # x fastest, as 3ddens
         for s in range(0, flat.size, 5):
@@ -328,6 +370,12 @@ def main():
                     help="'val' for potentials/valence densities, 'tot' for case.clmsum (default val)")
     ap.add_argument('--grid', type=int, nargs=3, required=True, metavar=('NX', 'NY', 'NZ'),
                     help='points per axis including both end planes (as the first line of case.in3d)')
+    ap.add_argument('--origin', type=Fraction, nargs=3, default=[Fraction(0)] * 3, metavar=('X', 'Y', 'Z'),
+                    help='grid origin, fractional coordinates of the conventional cell (default 0 0 0; '
+                         'fractions like 1/2 are accepted)')
+    ap.add_argument('--edges', type=Fraction, nargs=9, default=[Fraction(x) for x in (1, 0, 0, 0, 1, 0, 0, 0, 1)],
+                    metavar='E', help='the three grid edge vectors, fractional coordinates of the conventional '
+                                      'cell (default: the conventional cell, 1 0 0  0 1 0  0 0 1)')
     ap.add_argument('--nshell', type=int, nargs=3, default=[2, 2, 2])
     ap.add_argument('--nproc', type=int, default=None)
     ap.add_argument('--workdir', default=None, help='keep lapw5 files here (default: temporary)')
@@ -339,12 +387,19 @@ def main():
           f"{', '.join(f'{x*BOHR:.4f}' for x in struct['abc_bohr'])} Å")
     runner = Lapw5Runner(args.struct, args.clm, args.sub, args.norm, tuple(args.nshell),
                          args.workdir, args.nproc, keep=args.workdir is not None)
+    origin = [float(x) for x in args.origin]
+    edges = [[float(x) for x in args.edges[3 * i:3 * i + 3]] for i in range(3)]
+    if abs(np.linalg.det(np.array(edges))) < 1e-9:
+        sys.exit("Error: --edges are linearly dependent")
+    for e in edges:
+        if not is_lattice_translation(e, struct['lattice']):
+            print(f"WARNING: edge {e} is not a lattice translation; the grid is not periodic along it")
     try:
-        data = runner.grid3d((0, 0, 0), [(1, 0, 0), (0, 1, 0), (0, 0, 1)], args.grid)
+        data = runner.grid3d(origin, edges, args.grid)
     finally:
         runner.close()
     what = f"{Path(args.clm).name}" + (f" - {Path(args.sub).name}" if args.sub else '')
-    write_xsf(args.output, data, struct, f"{what}, norm {args.norm}, units ATU")
+    write_xsf(args.output, data, struct, f"{what}, norm {args.norm}, units ATU", origin, edges)
     print(f"wrote {args.output}: {what}, grid {tuple(args.grid)}, range [{data.min():.6g}, {data.max():.6g}]")
 
 

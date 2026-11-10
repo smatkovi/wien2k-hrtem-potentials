@@ -17,6 +17,13 @@ scalar-relativistic valence, neutral IAM; see the README *Known issues*).
 Fig. 3 now follows the paper's definitions (§6); Fig. 2 (§7) and the
 mean-inner-potential check through the full route (§8) are added.
 
+Third revision 2026-11-10: the CXY cell above is not exactly hexagonal
+(4.264 Å = √3 × 2.462 Å instead of √3 × 2.461 Å = 4.2626 Å; README *Known
+issues*). §8 and §10 now use the hexagonal case
+`~/wien2k_tests/Graphene/hex/Graphene` (P6/mmm, a = 2.461 Å), sampled on its
+rectangular cell a₁, a₁ + 2a₂. The numbers of the other sections were not
+recomputed; Fig. 3 (§6) is unchanged to the printed digits.
+
 ## 0. What the paper actually provides
 
 * The text on p. 397 and p. 399 (quoted below) is the **only** description of
@@ -254,24 +261,30 @@ ixchel `dat/fparams.dat`.
 p. 400: "For ideal graphene we find a difference in the mean inner potential
 of 15.5%."; p. 398: "The absolute differences between the DFT and IAM
 potentials are in the range of 10–30%". The DFT (SCF) and IAM (`x dstart`,
-checked) potentials of `Graphene/lebF/Graphene` were evaluated on the same
-75 × 127 × 451 grid and projected with `vcoul2tiff_ulm.py`:
+checked) potentials of `Graphene/hex/Graphene` were evaluated on the same
+75 × 127 × 451 grid over the rectangular cell and projected with
+`vcoul2tiff_ulm.py`:
 
 | quantity | DFT | IAM |
 |---|---|---|
-| vacuum level of V_C (shifted to V_s = 0) | +2.318 V | +2.815 V |
+| vacuum level of V_C (shifted to V_s = 0) | +2.318 V | +2.816 V |
 | voxels replaced by the cutoff | 4 | 4 |
-| mean of V_z (TIFF) | 0.80334 1/Å = 38.46 V·Å | 0.95389 1/Å = 45.67 V·Å |
-| mean inner potential (15 Å cell) | 2.564 V | 3.045 V |
+| mean of V_z (TIFF) | 0.80351 1/Å = 38.47 V·Å | 0.95428 1/Å = 45.69 V·Å |
+| mean inner potential (15 Å cell) | 2.565 V | 3.046 V |
 
-Change DFT vs IAM: **−15.78 %** (paper 15.5 %). Without the cutoff the four
+Change DFT vs IAM: **−15.80 %** (paper 15.5 %). Without the cutoff the four
 nucleus voxels (−1.63 MV each) add 1.55 V to both means and the change drops
-to −10.45 %, so the cutoff matters for this number too. The relative
-difference (V_z,DFT − V_z,IAM)/V_z,IAM ranges from −30.6 % (bond region;
-−30.2 % and −30.0 % at the vertical and inclined bond centres, −22.0 % at the
-hexagon centre) to −1.7 % (at the nuclei), in line with the paper's 10–30 %. The
-vacuum is flat to 1e-5 V over ±1 Å around the cell centre, as the
-"smallest value = 0" normalisation of a slab requires.
+to −10.46 %, so the cutoff matters for this number too. The relative
+difference (V_z,DFT − V_z,IAM)/V_z,IAM ranges from −30.5 % (bond region;
+−30.1 % at the bond centres, −22.0 % at the hexagon centre) to −1.7 % (at the
+nuclei), in line with the paper's 10–30 %. The vacuum is flat to 1e-5 V over
+±1 Å around the cell centre, as the "smallest value = 0" normalisation of a
+slab requires.
+
+With the CXY cell of the second revision (b/a 0.04 % above √3,
+`Graphene/lebF/Graphene`) the same evaluation gave −15.78 % (−10.45 %
+without the cutoff), −30.6 … −1.7 %, and −30.2 % / −30.0 % at the vertical /
+inclined bond centre.
 
 ## 9. Summary of changes to `src/vcoul2tiff_ulm.py`
 
@@ -292,22 +305,25 @@ vacuum is flat to 1e-5 V over ±1 Å around the cell centre, as the
 ## 10. How to regenerate the checks
 
 ```bash
-cd ~/wien2k_tests/Graphene/lebF/Graphene  # README step 1 done: vcoul_DFT, vcoul_IAM; case.vcoul = vcoul_DFT
-cp <repo>/reference/lapw5_fig3/* .        # Graphene.in5_fig3(_3000), lapw5_fig3(_3000).def,
-                                          # Graphene.in3d_ongrid, 3ddens_vcoul_ongrid.def
+cd ~/wien2k_tests/Graphene/hex/Graphene   # README step 1 done: vcoul_DFT, vcoul_IAM; case.vcoul = vcoul_DFT
+cp <repo>/reference/lapw5_fig3_hex/* .    # Graphene.in5_fig3(_3000), lapw5_fig3(_3000).def
 # 1. high-resolution x-z plane through the nucleus (600 ppÅ: 2 s, 3000 ppÅ: 25 s)
 lapw5c lapw5_fig3_3000.def                # writes Graphene.rho_fig3_3000 (Ry)
-# 2. 3D grids with all nuclei on voxels (lapw5grid handles the CXY centring)
+# 2. 3D grids over the rectangular cell a1, a1 + 2 a2 with all nuclei on voxels
+crystruct --ixchel "1 0 0  1 2 0  0 0 1" Graphene.struct > Graphene_ixchel_001.cfg
 for k in DFT IAM; do
   $PY <repo>/src/lapw5grid.py --struct Graphene.struct --clm Graphene.vcoul_$k \
-      --grid 75 127 451 -o Graphene_vcoul_${k}_ongrid.xsf
+      --grid 75 127 451 --edges 1 0 0  1 2 0  0 0 1 -o Graphene_vcoul_${k}_ongrid.xsf
   $PY <repo>/src/vcoul2tiff_ulm.py --xsf Graphene_vcoul_${k}_ongrid.xsf \
       --cfg Graphene_ixchel_001.cfg -o ulm_${k}_001
 done
-#    (3ddens 3ddens_vcoul_ongrid.def writes the same grid from Graphene.vcoul
-#     but misses the sphere contributions of the centring atoms)
 # 3. Fig. 3 and the mean inner potential (§6, §8)
 $PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3_3000 kurasch_fig3_graphene.png
-$PY -c "import tifffile; d, i = (tifffile.imread(f'ulm_{k}_001/atompota.tif', key=1).mean() for k in ('DFT', 'IAM')); print(f'MIP change {100*(d/i-1):+.2f} %')"
+$PY <repo>/analysis/mip_compare.py .
 # 4. Fig. 2 (§7): README step 5e, case ~/wien2k_tests/C_single
 ```
+
+For the old CXY case (`Graphene/lebF/Graphene`) the inputs are in
+`reference/lapw5_fig3/` and `lapw5grid.py` is called without `--edges`
+(`3ddens 3ddens_vcoul_ongrid.def` writes the same grid from `Graphene.vcoul`
+but misses the sphere contributions of the centring atoms).

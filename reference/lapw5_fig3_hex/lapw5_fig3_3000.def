@@ -1,0 +1,9 @@
+5 ,'Graphene.in5_fig3_3000', 'old',    'formatted',0
+6 ,'Graphene.output5_fig3_3000',   'unknown','formatted',0
+8 ,'Graphene.struct',    'old',    'formatted',0
+9 ,'Graphene.vcoul',    'old',    'formatted',0
+10,'Graphene.tmp_fig3_3000',       'unknown','unformatted',0
+11,'Graphene.vcouldn_fig3_3000_dummy',  'unknown','formatted',0
+12,'Graphene.sigma',     'unknown','formatted',0
+20,'Graphene.rho_onedim_fig3_3000','unknown','formatted',0
+21,'Graphene.rho_fig3_3000',       'unknown','formatted',0
