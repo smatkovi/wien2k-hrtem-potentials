@@ -69,62 +69,61 @@ import numpy as np
 
 BOHR = 0.529177210903   # Bohr -> Å
 
+# centring translations of the WIEN2k lattice types (fractions of the conventional cell)
+CENTRING = {'P': [(0, 0, 0)], 'H': [(0, 0, 0)], 'B': [(0, 0, 0), (0.5, 0.5, 0.5)],
+            'F': [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],
+            'CXY': [(0, 0, 0), (0.5, 0.5, 0)], 'CXZ': [(0, 0, 0), (0.5, 0, 0.5)], 'CYZ': [(0, 0, 0), (0, 0.5, 0.5)]}
 
-# ═══════════════════════════════════════════════════════════════
-# case.struct
-# ═══════════════════════════════════════════════════════════════
+# file list of one lapw5 run (Fortran unit, file): 5 input, 6 log, 8 struct, 9 the clm file,
+# 11 the clm file to subtract, 21 the values on the plane
+DEF = """\
+5 ,'{tag}.in5','old','formatted',0
+6 ,'{tag}.output5','unknown','formatted',0
+8 ,'case.struct','old','formatted',0
+9 ,'clm_a','old','formatted',0
+10,'{tag}.tmp','unknown','unformatted',0
+11,'{unit11}','unknown','formatted',0
+12,'{tag}.sigma','unknown','formatted',0
+20,'{tag}.rho_onedim','unknown','formatted',0
+21,'{tag}.rho','unknown','formatted',0
+"""
+
+
+# ── case.struct ────────────────────────────────────────────────
 
 def read_struct(path):
     """Lattice type, lattice constants [bohr], angles [deg] and all atoms of
     the conventional cell as listed in case.struct (centring copies are NOT
     included; see centring_translations)."""
     lines = Path(path).read_text().splitlines()
-    lattice = lines[1][:4].strip()
     abc = [float(lines[3][i:i + 10]) for i in (0, 10, 20)]
     ang = []
     for i in (30, 40, 50):
         s = lines[3][i:i + 10].strip()
-        v = float(s) if s else 90.0
-        ang.append(90.0 if v == 0.0 else v)
-    atoms = []
-    i = 4
+        ang.append(float(s) if s and float(s) != 0.0 else 90.0)      # blank or 0 means 90°
+    atoms, i = [], 4
     while i < len(lines):
-        ln = lines[i]
-        if ln.startswith('ATOM'):
-            pos = [_xyz(ln)]
-            mult = int(lines[i + 1].split('MULT=')[1].split()[0])
-            for k in range(1, mult):
-                pos.append(_xyz(lines[i + 1 + k]))
-            el = lines[i + 1 + mult]
-            name = el[:10].strip()
-            z = float(el.split('Z:')[1].split()[0])
-            atoms.append({'name': name, 'Z': z, 'positions': pos})
-            i += 2 + mult
-        else:
+        if not lines[i].startswith('ATOM'):
             i += 1
-    return {'lattice': lattice, 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
+            continue
+        mult = int(lines[i + 1].split('MULT=')[1].split()[0])        # line i + 1: MULT= and ISPLIT=
+        rows = [i, *range(i + 2, i + 1 + mult)]                      # first position, then the equivalent ones
+        el = lines[i + 1 + mult]                                     # element line, after the positions
+        atoms.append({'name': el[:10].strip(), 'Z': float(el.split('Z:')[1].split()[0]),
+                      'positions': [_xyz(lines[j]) for j in rows]})
+        i += 2 + mult
+    return {'lattice': lines[1][:4].strip(), 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
 
 
 def _xyz(line):
     s = line.split('X=')[1]
-    x = float(s[:10]); y = float(s.split('Y=')[1][:10]); z = float(s.split('Z=')[1][:10])
-    return (x, y, z)
+    return (float(s[:10]), float(s.split('Y=')[1][:10]), float(s.split('Z=')[1][:10]))
 
 
 def centring_translations(lattice):
-    lat = lattice.upper()
-    if lat.startswith('CXY'):
-        return [(0, 0, 0), (0.5, 0.5, 0)]
-    if lat.startswith('CXZ'):
-        return [(0, 0, 0), (0.5, 0, 0.5)]
-    if lat.startswith('CYZ'):
-        return [(0, 0, 0), (0, 0.5, 0.5)]
-    if lat.startswith('F'):
-        return [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)]
-    if lat.startswith('B'):
-        return [(0, 0, 0), (0.5, 0.5, 0.5)]
-    if lat.startswith('P') or lat.startswith('H'):
-        return [(0, 0, 0)]
+    for key, shifts in CENTRING.items():
+        if lattice.upper().startswith(key):
+            return list(shifts)
     raise NotImplementedError(f"lattice type '{lattice}' not supported")
 
 
@@ -132,25 +131,19 @@ def conventional_vectors_ang(struct):
     """Cartesian conventional lattice vectors [Å] (rows) in the WIEN2k/3ddens
     orientation.  Orthogonal cells and the hexagonal H lattice only."""
     a, b, c = (x * BOHR for x in struct['abc_bohr'])
-    al, be, ga = struct['angles']
-    lat = struct['lattice'].upper()
-    if lat.startswith('H'):
+    if struct['lattice'].upper().startswith('H'):
         return np.array([[a * math.sqrt(3) / 2, -a / 2, 0], [0, a, 0], [0, 0, c]])
-    if all(abs(x - 90.0) < 1e-6 for x in (al, be, ga)):
+    if all(abs(x - 90.0) < 1e-6 for x in struct['angles']):
         return np.diag([a, b, c])
     raise NotImplementedError("non-orthogonal cells other than H are not supported")
 
 
-# ═══════════════════════════════════════════════════════════════
-# lapw5 driver
-# ═══════════════════════════════════════════════════════════════
+# ── lapw5 driver ───────────────────────────────────────────────
 
 def _int_vector(frac3, max_den=10**6):
     """(IX, IY, IZ, IDV) with IX/IDV = frac3[0] etc. (exact when possible)."""
-    fr = [Fraction(x).limit_denominator(max_den) if not isinstance(x, Fraction) else x for x in frac3]
-    den = 1
-    for f in fr:
-        den = den * f.denominator // math.gcd(den, f.denominator)
+    fr = [x if isinstance(x, Fraction) else Fraction(x).limit_denominator(max_den) for x in frac3]
+    den = math.lcm(*(f.denominator for f in fr))
     if den > 10**8:                                    # keep integers well inside int32
         den = max_den
         fr = [Fraction(round(float(f) * den), den) for f in fr]
@@ -189,18 +182,13 @@ class Lapw5Runner:
         self.nshell = nshell            # minimum; raised per plane if needed
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
         self.keep = keep
-        self._tmp = None
-        if workdir is None:
-            self._tmp = tempfile.mkdtemp(prefix='lapw5grid_')
-            workdir = self._tmp
-        self.wd = Path(workdir)
+        self._tmp = tempfile.mkdtemp(prefix='lapw5grid_') if workdir is None else None
+        self.wd = Path(self._tmp or workdir)            # temporary unless a workdir is given
         self.wd.mkdir(parents=True, exist_ok=True)
         for name, src in (('case.struct', struct_path), ('clm_a', clm_a), ('clm_b', clm_b)):
-            dst = self.wd / name
-            if dst.is_symlink() or dst.exists():
-                dst.unlink()
+            (self.wd / name).unlink(missing_ok=True)    # stale link of an earlier run
             if src:
-                dst.symlink_to(Path(src).resolve())
+                (self.wd / name).symlink_to(Path(src).resolve())
         self._counter = 0
         self._grid_calls = 0
 
@@ -214,36 +202,19 @@ class Lapw5Runner:
         if tag is None:
             self._counter += 1
             tag = f"p{self._counter:05d}"
+        wd = self.wd
         # lapw5 looks for muffin-tin spheres only among the cell origins
         # -NSHELL..+NSHELL, so every corner of the plane must lie well inside
-        corners = np.array([origin, xend, yend,
-                            np.asarray(xend, float) + np.asarray(yend, float) - np.asarray(origin, float)],
-                           dtype=float)
-        nshell = [max(int(s), int(math.ceil(np.max(np.abs(corners[:, i])) - 1e-9)) + 1)
-                  for i, s in enumerate(self.nshell)]
-        wd = self.wd
-        in5 = wd / f"{tag}.in5"
-        with open(in5, 'w') as f:
-            for v in (origin, xend, yend):
-                f.write("%d %d %d %d\n" % _int_vector(v))
-            f.write("%d %d %d\n" % tuple(nshell))
-            f.write("%d %d\n" % (npx, npy))
-            f.write("RHO SUB \n" if self.sub else "RHO     \n")
-            f.write(f"ATU {self.norm} NODEBUG\n")
-            f.write("NONORTHO\n")
-        unit11 = 'clm_b' if self.sub else f"{tag}.none"
-        with open(wd / f"{tag}.def", 'w') as f:
-            f.write(f"5 ,'{tag}.in5','old','formatted',0\n")
-            f.write(f"6 ,'{tag}.output5','unknown','formatted',0\n")
-            f.write("8 ,'case.struct','old','formatted',0\n")
-            f.write("9 ,'clm_a','old','formatted',0\n")
-            f.write(f"10,'{tag}.tmp','unknown','unformatted',0\n")
-            f.write(f"11,'{unit11}','unknown','formatted',0\n")
-            f.write(f"12,'{tag}.sigma','unknown','formatted',0\n")
-            f.write(f"20,'{tag}.rho_onedim','unknown','formatted',0\n")
-            f.write(f"21,'{tag}.rho','unknown','formatted',0\n")
-        env = dict(os.environ, OMP_NUM_THREADS='1')
-        res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True, env=env)
+        o, x, y = (np.asarray(v, float) for v in (origin, xend, yend))
+        reach = np.abs([o, x, y, x + y - o]).max(axis=0)            # farthest corner along each cell axis
+        nshell = [max(int(s), math.ceil(r - 1e-9) + 1) for s, r in zip(self.nshell, reach)]
+        in5 = ["%d %d %d %d" % _int_vector(v) for v in (origin, xend, yend)]
+        in5 += ["%d %d %d" % tuple(nshell), "%d %d" % (npx, npy), "RHO SUB " if self.sub else "RHO     ",
+                f"ATU {self.norm} NODEBUG", "NONORTHO"]
+        (wd / f"{tag}.in5").write_text("\n".join(in5) + "\n")
+        (wd / f"{tag}.def").write_text(DEF.format(tag=tag, unit11='clm_b' if self.sub else f"{tag}.none"))
+        res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True,
+                             env=dict(os.environ, OMP_NUM_THREADS='1'))
         rho = wd / f"{tag}.rho"
         if (res.returncode != 0 or not re.search(r'STOP\s+LAPW5C?\s+END', res.stdout + res.stderr)
                 or not rho.exists()):
@@ -256,13 +227,10 @@ class Lapw5Runner:
             vals = np.array(f.read().split(), dtype=np.float64)
         if int(head[0]) != npx or int(head[1]) != npy or vals.size != npx * npy:
             raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
-        data = vals.reshape((npx, npy))            # prtrh.f: x outer, y inner
         if not self.keep:
             for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
-                p = wd / f"{tag}.{ext}"
-                if p.exists():
-                    p.unlink()
-        return data
+                (wd / f"{tag}.{ext}").unlink(missing_ok=True)
+        return vals.reshape((npx, npy))            # prtrh.f: x outer, y inner
 
     def grid3d(self, origin, edges, counts, progress=True):
         """Values at origin + i/(n0-1) e0 + j/(n1-1) e1 + k/(n2-1) e2 for all
@@ -275,32 +243,24 @@ class Lapw5Runner:
             raise ValueError("every axis needs at least 2 points")
         k = int(np.argmin(counts))
         p, q = [ax for ax in range(3) if ax != k]
-        out = np.empty(counts)
         nk = counts[k]
         self._grid_calls += 1
         call = self._grid_calls                 # file names unique across calls (--workdir)
 
         def job(m):
             o = origin + edges[k] * (m / (nk - 1))
-            plane = self.plane(o, o + edges[p], o + edges[q], counts[p], counts[q],
-                               tag=f"g{call:03d}_{m:05d}")
-            return m, plane
+            return self.plane(o, o + edges[p], o + edges[q], counts[p], counts[q], tag=f"g{call:03d}_{m:05d}")
 
-        done = 0
+        planes = []
         with ThreadPoolExecutor(max_workers=self.nproc) as ex:
-            for m, plane in ex.map(job, range(nk)):
-                idx = [slice(None)] * 3
-                idx[k] = m
-                out[tuple(idx)] = plane
-                done += 1
-                if progress and (done % max(1, nk // 10) == 0 or done == nk):
-                    print(f"    lapw5 planes {done}/{nk}", flush=True)
-        return out
+            for plane in ex.map(job, range(nk)):                    # results arrive in the order of m
+                planes.append(plane)
+                if progress and (len(planes) % max(1, nk // 10) == 0 or len(planes) == nk):
+                    print(f"    lapw5 planes {len(planes)}/{nk}", flush=True)
+        return np.stack(planes, axis=k)
 
 
-# ═══════════════════════════════════════════════════════════════
-# XSF output (3ddens-compatible general grid)
-# ═══════════════════════════════════════════════════════════════
+# ── XSF output (3ddens-compatible general grid) ────────────────
 
 def is_lattice_translation(vec, lattice, tol=1e-6):
     """True if vec (fractional, conventional cell) is a translation of the lattice."""
@@ -339,22 +299,16 @@ def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (
     o_cart = np.asarray(origin, float) @ conv
     atoms = [(z, f @ conv) for z, f in atoms_in_cell(struct, origin, edges)]
     nx, ny, nz = data.shape
+    vec = "%16.8E%16.8E%16.8E\n"
+    cell_txt = ''.join(vec % tuple(v) for v in cell)
     with open(path, 'w') as f:
         f.write(f"# XSF-File prepared by lapw5grid.py (values from lapw5)\n# {comment}\n")
-        f.write("CRYSTAL\nPRIMVEC\n")
-        for v in cell:
-            f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
-        f.write("CONVVEC\n")
-        for v in cell:
-            f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
+        f.write(f"CRYSTAL\nPRIMVEC\n{cell_txt}CONVVEC\n{cell_txt}")
         f.write("PRIMCOORD\n%5d    1\n" % len(atoms))
         for z, r in atoms:
-            f.write("%3d%16.8E%16.8E%16.8E\n" % (z, *r))
+            f.write("%3d" % z + vec % tuple(r))
         f.write("BEGIN_BLOCK_DATAGRID3D\n lapw5grid\nDATAGRID_3D_GRID\n")
-        f.write(f"{nx} {ny} {nz}\n")
-        f.write("%16.8E%16.8E%16.8E\n" % tuple(o_cart))
-        for v in cell:
-            f.write("%16.8E%16.8E%16.8E\n" % tuple(v))
+        f.write(f"{nx} {ny} {nz}\n" + vec % tuple(o_cart) + cell_txt)
         flat = data.reshape(-1, order='F')             # x fastest, as 3ddens
         for s in range(0, flat.size, 5):
             f.write(''.join("%16.8E" % v for v in flat[s:s + 5]) + "\n")
