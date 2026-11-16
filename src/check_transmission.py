@@ -42,6 +42,7 @@ def read_complex(path):
 
 
 def cfg_value(text, pattern, what, path):
+    """The match of `pattern` in a cfg text (comments removed); stops with a message if there is none."""
     m = re.search(pattern, re.sub(r'#[^\n]*', '', text))
     if not m:
         sys.exit(f"Error: {what} not found in {path}")
@@ -58,31 +59,36 @@ def main():
     ap.add_argument('--ref-trans', help='reference trans_<label>.tif')
     args = ap.parse_args()
 
+    # 1. the numbers from the two cfg files, e.g.
+    #        crystal cfg:     NCELL = [ 14, 8, 1];     size_uc = { x = 2.4609990418; y = 4.2625753778; ... };
+    #        simulation cfg:  dim = [ 1008, 1008];     v0 = 80.;
     cry = Path(args.crystal).read_text()
     sim = Path(args.sim).read_text()
-    nc = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', re.sub(r'#[^\n]*', '', cry))
-    ncx, ncy = (int(nc.group(1)), int(nc.group(2))) if nc else (1, 1)   # ixchel default
-    su = cfg_value(cry, r'size_uc\s*=\s*\{[^}]*?x\s*=\s*([0-9.eE+\-]+)[^}]*?y\s*=\s*([0-9.eE+\-]+)',
-                   'size_uc', args.crystal)
-    dm = cfg_value(sim, r'\bdim\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', 'dim', args.sim)
-    v0 = float(cfg_value(sim, r'\bv0\s*=\s*([0-9.eE+\-]+)', 'v0', args.sim).group(1))
+    ncell = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', re.sub(r'#[^\n]*', '', cry))
+    ncx, ncy = (int(ncell.group(1)), int(ncell.group(2))) if ncell else (1, 1)   # ixchel default
+    size = cfg_value(cry, r'size_uc\s*=\s*\{[^}]*?x\s*=\s*([0-9.eE+\-]+)[^}]*?y\s*=\s*([0-9.eE+\-]+)',
+                     'size_uc', args.crystal)
+    dim = cfg_value(sim, r'\bdim\s*=\s*\[\s*(\d+)\s*,\s*(\d+)', 'dim', args.sim)
+    v0 = float(cfg_value(sim, r'\bv0\s*=\s*([0-9.eE+\-]+)', 'v0', args.sim).group(1))     # high tension [kV]
 
     # supercell size [Å] in float32, as ixchel computes it (ixchelfun.cpp, incwf)
-    ax = np.float32(ncx) * np.float32(float(su.group(1)))
-    by = np.float32(ncy) * np.float32(float(su.group(2)))
-    nx, ny = int(dm.group(1)), int(dm.group(2))
+    ax = np.float32(ncx) * np.float32(float(size.group(1)))
+    by = np.float32(ncy) * np.float32(float(size.group(2)))
+    nx, ny = int(dim.group(1)), int(dim.group(2))
 
-    # electron wavelength [Å] and interaction scale, as in ixchel utils.h / ixchelfun.cpp
+    # 2. electron wavelength [Å] and interaction scale, as in ixchel utils.h / ixchelfun.cpp
     m0c2, hc = 510.99895, 12.398419843320026         # keV, keV·Å
     lam = hc / np.sqrt(v0 * (2.0 * m0c2 + v0))
     sigma = lam * (1.0 + v0 / 511.0)
 
+    # 3. the two helpers: ixchel's band limit, and the comparison of one potential with one transmission file
     def band_limit(v):
         # ixchel's mask bit for bit: float32 arithmetic, BW = 2.0F/3.0F, keep k² < k2max
         # (ixchelfun.cpp incwf; slicelib.cpp freqn: index i > n/2 is negative)
         f32 = np.float32
 
         def k2(n, a):
+            """k² [1/Å²] for the n pixels along an edge of length a."""
             i = np.arange(n)
             k = np.where(i > n // 2, i - n, i).astype(f32) / f32(a)
             return k * k
@@ -94,26 +100,29 @@ def main():
         return np.fft.ifft2(F).real
 
     def check(pot_path, trans_path, label):
+        """Print how well the phase of ixchel's transmission function agrees with sigma * V."""
         V = read_ixchel_tiff(pot_path)
         t = read_complex(trans_path)
         if V.shape != (ny, nx) or t.shape != (ny, nx):
             sys.exit(f"Error: {label}: shapes {V.shape} / {t.shape} differ from dim {nx} x {ny}")
-        pred = sigma * band_limit(V)
-        err = np.abs(np.angle(t * np.exp(-1j * pred)))
+        pred = sigma * band_limit(V)                            # the phase ixchel should have written
+        err = np.abs(np.angle(t * np.exp(-1j * pred)))          # what is left after removing it, within -pi ... pi
         print(f"{label}: |t| in [{np.abs(t).min():.6f}, {np.abs(t).max():.6f}], "
               f"phase in [{np.angle(t).min():.4f}, {np.angle(t).max():.4f}] rad, "
               f"max |phase - sigma*V| = {err.max():.2e} rad")
         return t, V
 
+    # 4. the check itself, and with a reference pair the phase difference between the two runs
     print(f"v0 = {v0:g} kV, lambda = {lam:.5f} Å, sigma = {sigma:.5f} Å (phase = sigma * V[1/Å]), "
           f"supercell {ax:.3f} x {by:.3f} Å on {nx} x {ny} px")
     t, V = check(args.pot, args.trans, 'layer')
     if args.ref_pot and args.ref_trans:
         t0, V0 = check(args.ref_pot, args.ref_trans, 'reference')
-        d = np.angle(t * np.conj(t0))
-        p = sigma * band_limit(V - V0)
-        print(f"phase difference layer - reference: [{d.min():.4f}, {d.max():.4f}] rad, "
-              f"predicted [{p.min():.4f}, {p.max():.4f}] rad, max deviation {np.abs(d - p).max():.2e} rad")
+        measured = np.angle(t * np.conj(t0))
+        predicted = sigma * band_limit(V - V0)
+        print(f"phase difference layer - reference: [{measured.min():.4f}, {measured.max():.4f}] rad, "
+              f"predicted [{predicted.min():.4f}, {predicted.max():.4f}] rad, "
+              f"max deviation {np.abs(measured - predicted).max():.2e} rad")
 
 
 if __name__ == '__main__':
