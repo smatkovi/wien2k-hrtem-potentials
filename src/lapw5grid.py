@@ -59,7 +59,7 @@ Arguments and where they come from:
                  case.clmsum  total density, written by the SCF cycle or by
                               `x dstart` (superposed atoms)
                  In the DFT-vs-IAM workflow these are copies made by hand (README,
-                 step 1): case.vcoul_DFT after the SCF, case.vcoul_IAM after
+                 steps 2 and 3): case.vcoul_DFT after the SCF, case.vcoul_IAM after
                  `x dstart` + `x lapw0`.
     --sub        optional second file of the same kind; lapw5 subtracts it from
                  --clm before the values are written (e.g. case.vcoul_IAM)

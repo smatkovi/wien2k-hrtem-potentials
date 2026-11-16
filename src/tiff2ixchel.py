@@ -30,8 +30,8 @@ Arguments and where they come from:
                  the run.  Read from it: dim, NCELL and the file name of every
                  layer (atompot<label>.tif); its checksum goes into the output.
     -i           the directory with the one-unit-cell layer TIFFs, i.e. the -o
-                 directory of vcoul2tiff.py (wien2k_001 in the README),
-                 vcoul2tiff_ulm.py or xsf2tiff_dwFactor.py.  The name is free; the
+                 directory of vcoul2tiff_ulm.py (ulm_DFT_001 in the README),
+                 vcoul2tiff.py or xsf2tiff_dwFactor.py.  The name is free; the
                  files in it carry the layer file names of the cfg.
     -o           the directory for the ixchel-ready TIFFs (same file names).  Use
                  the directory in which `ixchel main` runs, ixchel looks for the

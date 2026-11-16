@@ -13,13 +13,13 @@ copies at (1/2, 2/3, 0) and (1/2, 1/3, 0)), WIEN2k 24.1.
 
 Second revision 2026-10-13: re-run on clean graphene data
 (`~/wien2k_tests/Graphene/lebF/Graphene`: Lebedev reduction off,
-scalar-relativistic valence, neutral IAM; see the README *Known issues*).
+scalar-relativistic valence, neutral IAM; see the README *Pitfalls*).
 Fig. 3 now follows the paper's definitions (§6); Fig. 2 (§7) and the
 mean-inner-potential check through the full route (§8) are added.
 
 Third revision 2026-11-10: the CXY cell above is not exactly hexagonal
-(4.264 Å = √3 × 2.462 Å instead of √3 × 2.461 Å = 4.2626 Å; README *Known
-issues*). §8 and §10 now use the hexagonal case
+(4.264 Å = √3 × 2.462 Å instead of √3 × 2.461 Å = 4.2626 Å;
+`~/wien2k_tests/Graphene/hex/RUN.md`). §8 and §10 now use the hexagonal case
 `~/wien2k_tests/Graphene/hex/Graphene` (P6/mmm, a = 2.461 Å), sampled on its
 rectangular cell a₁, a₁ + 2a₂. The numbers of the other sections were not
 recomputed; Fig. 3 (§6) is unchanged to the printed digits.
@@ -305,7 +305,7 @@ inclined bond centre.
 ## 10. How to regenerate the checks
 
 ```bash
-cd ~/wien2k_tests/Graphene/hex/Graphene   # README step 1 done: vcoul_DFT, vcoul_IAM; case.vcoul = vcoul_DFT
+cd ~/wien2k_tests/Graphene/hex/Graphene   # README steps 0-3 done: vcoul_DFT, vcoul_IAM; case.vcoul = vcoul_DFT
 cp <repo>/reference/lapw5_fig3_hex/* .    # Graphene.in5_fig3(_3000), lapw5_fig3(_3000).def
 # 1. high-resolution x-z plane through the nucleus (600 ppÅ: 2 s, 3000 ppÅ: 25 s)
 lapw5c lapw5_fig3_3000.def                # writes Graphene.rho_fig3_3000 (Ry)
@@ -320,7 +320,7 @@ done
 # 3. Fig. 3 and the mean inner potential (§6, §8)
 $PY <repo>/src/plot_kurasch_fig3.py Graphene.rho_fig3_3000 kurasch_fig3_graphene.png
 $PY <repo>/analysis/mip_compare.py .
-# 4. Fig. 2 (§7): README step 5e, case ~/wien2k_tests/C_single
+# 4. Fig. 2 (§7): README, Figures 2 and 3 of the paper; case ~/wien2k_tests/C_single
 ```
 
 For the old CXY case (`Graphene/lebF/Graphene`) the inputs are in
