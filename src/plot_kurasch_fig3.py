@@ -32,6 +32,10 @@ blue  : "the mean value of the green line at a resolution of 30 ppÅ" (caption),
 black : Doyle–Turner (1968) projected potential of carbon (dotted, as in the
         paper) and Kirkland's (dash-dot, for comparison)
 
+Layout of this file: a linear script.  The input comes first (arguments, two
+file readers, the lapw5 plane), then the marked CORE (green, blue, red), then
+the reference curves and the plot.
+
 Usage:
     python3 plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png [case.vcoul case.struct]
     (case.vcoul / case.struct default to <case>.vcoul / <case>.struct next to the rho file)
@@ -51,16 +55,53 @@ BOHR = 0.529177210903
 A0E = 0.529177210903 * 14.399645  # a0*e  [V*A^2]
 CUTOFF_V = 50000.0
 
-# The script runs from top to bottom, section by section:
-#   read rho -> green (no cutoff) -> blue boxes: (a) from the green curve, (b) ideal, with case.vcoul
-#   -> red on the 30 ppÅ subgrid -> red as in the paper (fine lateral line)
-#   -> Kirkland and Doyle–Turner reference curves -> plot
+# This script runs from top to bottom, so its input has to come first; the core is marked, not moved up:
+#   INPUT   the arguments, two file readers, the lapw5 plane
+#   CORE    green (no cutoff) -> blue boxes: (a) from the green curve, (b) ideal, with case.vcoul
+#           -> red on the 30 ppÅ subgrid -> red as in the paper (fine lateral line)
+#   REST    Kirkland and Doyle–Turner reference curves, the plot
+
+# ═══════════════════════════════════════════════════════════════
+# INPUT (not part of the core): arguments, file readers, the lapw5 plane
+# ═══════════════════════════════════════════════════════════════
 
 rho_path = sys.argv[1]
 out_png = sys.argv[2]
 _case = Path(rho_path).parent / Path(rho_path).name.split('.rho')[0]
 vcoul_path = sys.argv[3] if len(sys.argv) > 3 else f"{_case}.vcoul"
 struct_path = sys.argv[4] if len(sys.argv) > 4 else f"{_case}.struct"
+
+
+# ---------------------------------------------------------------- readers for case.struct and case.vcoul
+# (used in the core for the ideal pixel value, section (b) of the blue boxes)
+def read_struct_mt(path):
+    """(NPT, R0, RMT) of every inequivalent atom of a WIEN2k case.struct."""
+    return [(int(l[15:20]), float(l[25:35]), float(l[40:50]))
+            for l in Path(path).read_text().splitlines() if 'NPT=' in l]
+
+
+def read_vcoul_l0(path, npts):
+    """V_00(r)*r^2 [Ry*bohr^2] (L=0, M=0 channel) of every atom in case.vcoul."""
+    lines = Path(path).read_text().splitlines()
+    if not any('r**2' in l for l in lines[:5]):
+        sys.exit(f"Error: {path} does not look like a case.vcoul (VC(L,M)*r**2 header)")
+    out, iat, i = {}, None, 0
+    while i < len(lines):
+        m = re.search(r'ATOMNUMBER\s*=\s*(\d+)', lines[i])
+        if m:
+            iat = int(m.group(1))
+        elif (iat is not None and iat not in out
+              and re.search(r'VLM\(R\)\s+FOR\s+L\s+0\s+M=\s*0\b', lines[i])):
+            vals = []
+            i += 1
+            while len(vals) < npts[iat - 1]:
+                vals += [float(v) for v in re.findall(r'[-+]?\d*\.\d+E[-+]\d+', lines[i])]
+                i += 1
+            out[iat] = np.array(vals[:npts[iat - 1]])
+            continue
+        i += 1
+    return [out[k] for k in sorted(out)]
+
 
 # ---------------------------------------------------------------- read rho
 # The lapw5 output starts with the number of points along x and z and the two edge lengths in bohr,
@@ -86,6 +127,14 @@ print(f"dx = {dx*1000:.3f} mA ({1/dx:.1f} ppA), dz = {dz*1000:.3f} mA ({1/dz:.1f
 imin = np.unravel_index(np.argmin(V), V.shape)
 print(f"most negative voxel {V.min():.1f} Ry = {V.min()*RY_TO_V:.0f} V at index {imin} -> x={x[imin[0]]:.4f} z={z[imin[1]]:.4f} A")
 print(f"vacuum level (max) {V.max():.5f} Ry = {V.max()*RY_TO_V:.3f} V")
+
+# ═══════════════════════════════════════════════════════════════
+# CORE: the three curves of the figure
+#
+#   green   the projected potential without cutoff
+#   blue    its mean per 30 ppÅ pixel: (a) from the green curve, (b) the true pixel-column mean
+#   red     with the nearest-neighbour cutoff: on the 30 ppÅ subgrid, then as in the paper
+# ═══════════════════════════════════════════════════════════════
 
 # paper normalisation: V_s = -V_C, shifted so the smallest value (vacuum) is 0
 Vs = (V.max() - V) * RY_TO_V                     # [V], >= 0
@@ -137,35 +186,6 @@ def vz_radial(r):
 # part, constant V_s,00(RMT), interstitial) is smooth, so its z-sum on the lapw5
 # plane is accurate: R(rho) = green(rho) - sum_z f dz.  f itself is integrated
 # along z exactly, with z = rho*sinh(t) (dz = r dt) removing the 1/r cusp.
-def read_struct_mt(path):
-    """(NPT, R0, RMT) of every inequivalent atom of a WIEN2k case.struct."""
-    return [(int(l[15:20]), float(l[25:35]), float(l[40:50]))
-            for l in Path(path).read_text().splitlines() if 'NPT=' in l]
-
-
-def read_vcoul_l0(path, npts):
-    """V_00(r)*r^2 [Ry*bohr^2] (L=0, M=0 channel) of every atom in case.vcoul."""
-    lines = Path(path).read_text().splitlines()
-    if not any('r**2' in l for l in lines[:5]):
-        sys.exit(f"Error: {path} does not look like a case.vcoul (VC(L,M)*r**2 header)")
-    out, iat, i = {}, None, 0
-    while i < len(lines):
-        m = re.search(r'ATOMNUMBER\s*=\s*(\d+)', lines[i])
-        if m:
-            iat = int(m.group(1))
-        elif (iat is not None and iat not in out
-              and re.search(r'VLM\(R\)\s+FOR\s+L\s+0\s+M=\s*0\b', lines[i])):
-            vals = []
-            i += 1
-            while len(vals) < npts[iat - 1]:
-                vals += [float(v) for v in re.findall(r'[-+]?\d*\.\d+E[-+]\d+', lines[i])]
-                i += 1
-            out[iat] = np.array(vals[:npts[iat - 1]])
-            continue
-        i += 1
-    return [out[k] for k in sorted(out)]
-
-
 mt = read_struct_mt(struct_path)
 v00r2_all = read_vcoul_l0(vcoul_path, [n for n, _, _ in mt])
 Y00 = 1.0 / np.sqrt(4 * np.pi)
@@ -329,6 +349,10 @@ print(f"red (fine): columns above {CUTOFF_V:.0f} V at x = {np.round((x[flag_cols
       f"-> V_z = {np.round(red_fine[flag_cols], 0)} V*A")
 print(f"centre pixel: paper's blue / red = {line_cont[0] / red_fine[ix0]:.2f}, "
       f"ideal / red = {blue[0] / red_fine[ix0]:.2f}  (paper: 'within a factor of three')")
+
+# ═══════════════════════════════════════════════════════════════
+# END OF CORE.  Below: the reference curves (Kirkland, Doyle–Turner) and the plot
+# ═══════════════════════════════════════════════════════════════
 
 # ---------------------------------------------------------------- Kirkland projected potential for C (reference)
 # fparams.dat layout per element: a1 b1 a2 b2 / a3 b3 c1 d1 / c2 d2 c3 d3
