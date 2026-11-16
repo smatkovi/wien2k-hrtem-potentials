@@ -33,7 +33,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tifffile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ixchel_tiff import read_ixchel_tiff, write_ixchel_tiff     # noqa: E402
+
+read_potential_tiff = read_ixchel_tiff      # former name, still imported by check scripts
 
 
 # ── cfg parsing (only what the tiling needs) ───────────────────
@@ -78,31 +82,6 @@ def _make_cksum_table():
 
 
 _CKSUM_TABLE = _make_cksum_table()
-
-
-# ── TIFF I/O (ixchel layout: page 0 RGB preview, page 1 float32, page 2 checksums) ──
-
-def read_potential_tiff(path):
-    with tifffile.TiffFile(str(path)) as tif:
-        for page in tif.pages:
-            if page.dtype == np.float32 and page.ndim == 2:
-                return page.asarray().astype(np.float64)
-    sys.exit(f"Error: no float32 data page in {path}")
-
-
-def write_ixchel_tiff(filename, data_yx, cksum_cry):
-    Path(filename).parent.mkdir(parents=True, exist_ok=True)
-    data = data_yx.astype(np.float32)
-    vmin, vmax = float(data.min()), float(data.max())
-    if vmax == vmin:
-        vmax = vmin + 1e-6
-    preview = np.clip((data - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-    preview_rgb = np.stack([preview, preview, preview], axis=-1)
-    meta = np.array([[cksum_cry, 0]], dtype=np.uint32)   # [crystal_struct, simulation]
-    with tifffile.TiffWriter(filename) as tfw:
-        tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
-        tfw.write(data,        photometric='minisblack', contiguous=False)
-        tfw.write(meta,        photometric='minisblack', contiguous=False)
 
 
 # ── tiling + Fourier resampling ────────────────────────────────
@@ -176,7 +155,7 @@ def main():
         if not src.exists():
             print(f"  {fn}: missing in {args.input}, skipped")
             continue
-        uc = read_potential_tiff(src)
+        uc = read_ixchel_tiff(src)
         note = ''
         if uc.shape == (dim[1], dim[0]) and ncell != (1, 1):
             print(f"  WARNING: {fn} already has the ixchel dim shape {uc.shape}; "

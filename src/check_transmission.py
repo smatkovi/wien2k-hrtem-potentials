@@ -28,18 +28,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tifffile
 
-
-def read_page1(path):
-    with tifffile.TiffFile(str(path)) as tif:
-        return tif.pages[1].asarray().astype(np.float64)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ixchel_tiff import read_ixchel_tiff        # noqa: E402
 
 
 def read_complex(path):
     """ixchel complex TIFF: each row holds nx real parts followed by nx
     imaginary parts (src/TiffFile.cpp)."""
-    a = read_page1(path)
+    a = read_ixchel_tiff(path)
     nx = a.shape[1] // 2
     return a[:, :nx] + 1j * a[:, nx:]
 
@@ -97,7 +94,7 @@ def main():
         return np.fft.ifft2(F).real
 
     def check(pot_path, trans_path, label):
-        V = read_page1(pot_path)
+        V = read_ixchel_tiff(pot_path)
         t = read_complex(trans_path)
         if V.shape != (ny, nx) or t.shape != (ny, nx):
             sys.exit(f"Error: {label}: shapes {V.shape} / {t.shape} differ from dim {nx} x {ny}")

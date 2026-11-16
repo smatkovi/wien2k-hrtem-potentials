@@ -72,7 +72,9 @@ from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import maximum_filter, minimum_filter
-import tifffile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ixchel_tiff import write_ixchel_tiff       # noqa: E402
 
 
 # ── constants ──────────────────────────────────────────────────
@@ -366,26 +368,6 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     return proj.T, d_proj, n_slices                 # ixchel: [nrow=y, ncol=x]
 
 
-# ── TIFF output (ixchel format) ────────────────────────────────
-
-def write_ixchel_tiff(filename, data_yx):
-    """Write an ixchel-compatible TIFF: page 0 RGB preview, page 1 float32 data,
-    page 2 metadata placeholder."""
-    Path(filename).parent.mkdir(parents=True, exist_ok=True)
-    data = data_yx.astype(np.float32)
-    vmin, vmax = float(data.min()), float(data.max())
-    if vmax == vmin:
-        vmax = vmin + 1e-6
-    preview = np.clip((data - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-    preview_rgb = np.stack([preview] * 3, axis=-1)
-    meta = np.zeros((1, 2), dtype=np.uint32)
-    with tifffile.TiffWriter(filename) as tfw:
-        tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
-        tfw.write(data,        photometric='minisblack', contiguous=False)
-        tfw.write(meta,        photometric='minisblack', contiguous=False)
-    print(f"    -> {filename}  [{vmin:.4g} ... {vmax:.4g}] 1/Å")
-
-
 # ── main ───────────────────────────────────────────────────────
 
 def main():
@@ -481,7 +463,8 @@ def main():
         print(f"    V_z: [{proj_yx.min():.4f}, {proj_yx.max():.4f}] 1/Å"
               f" = [{proj_yx.min()*H2_2PI_ME:.1f}, {proj_yx.max()*H2_2PI_ME:.1f}] V·Å")
         fname = f"{out_dir}/{ly['filename']}"
-        write_ixchel_tiff(fname, proj_yx)
+        vmin, vmax = write_ixchel_tiff(fname, proj_yx)
+        print(f"    -> {fname}  [{vmin:.4g} ... {vmax:.4g}] 1/Å")
         outs.append(fname)
 
     print(f"\nDone -- {len(outs)} file(s) in '{out_dir}/'")

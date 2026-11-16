@@ -76,8 +76,10 @@ import numpy as np
 from scipy.fft     import fftn, ifftn, fftfreq
 from scipy.ndimage import map_coordinates
 from scipy.special import erf
-import tifffile
 import pylibconfig2
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ixchel_tiff                       # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BOHR      = 0.529177210903   # Bohr → Å
@@ -806,23 +808,13 @@ def kirkland_layer(layer, cfg, Nu, Nv, fp):
 
 def write_ixchel_tiff(filename, data_yx):
     """
-    Writes a float32 TIFF in ixchel format:
+    Writes a float32 TIFF in ixchel format (ixchel_tiff.py):
       Dir 0: RGB preview (uint8)
       Dir 1: float32 data
       Dir 2: checksums (uint32, empty)
     data_yx: shape (Nv, Nu) = (ny, nx) — rows = y, columns = x.
     """
-    Path(filename).parent.mkdir(parents=True, exist_ok=True)
-    data = data_yx.astype(np.float32)
-    vmin, vmax = float(data.min()), float(data.max())
-    if vmax == vmin: vmax = vmin + 1e-6
-    preview     = np.clip((data-vmin)/(vmax-vmin)*255, 0, 255).astype(np.uint8)
-    preview_rgb = np.stack([preview, preview, preview], axis=-1)
-    meta        = np.zeros((1, 2), dtype=np.uint32)
-    with tifffile.TiffWriter(filename) as tfw:
-        tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
-        tfw.write(data,        photometric='minisblack', contiguous=False)
-        tfw.write(meta,        photometric='minisblack', contiguous=False)
+    vmin, vmax = ixchel_tiff.write_ixchel_tiff(filename, data_yx)
     print(f"    → {filename}  [{vmin:.4g} … {vmax:.4g}] 1/Å")
 
 

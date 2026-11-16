@@ -63,6 +63,9 @@ Tools:
   `--origin`) sample another cell than the conventional one, e.g. the
   rectangular cell a₁, a₁ + 2a₂ of a **hexagonal (H) lattice**:
   `--edges 1 0 0  1 2 0  0 0 1`.
+* `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
+  page 1 float32 data, page 2 checksums): `read_ixchel_tiff`, `write_ixchel_tiff`.
+  Imported by the scripts that read or write layer files.
 * `src/tiff2ixchel.py` — tiles a one-unit-cell layer TIFF NCELL times and
   resamples it onto the ixchel `dim` grid (exact Fourier interpolation), with
   ixchel's cfg checksum. Required before `ixchel main`.
