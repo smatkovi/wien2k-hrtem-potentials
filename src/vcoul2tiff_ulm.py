@@ -75,18 +75,14 @@ from scipy.ndimage import maximum_filter, minimum_filter
 import tifffile
 
 
-# ═══════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════
+# ── constants ──────────────────────────────────────────────────
 
 BOHR      = 0.529177210903   # Bohr -> Å (not needed for XSF input, kept for reference)
 RY_TO_V   = 13.605693122994  # 1 Ry = 13.606 eV -> potential of an electron: 13.606 V
 H2_2PI_ME = 47.88            # h²/(2π m_e e) [V·Å²]  (Kirkland/ixchel unit of V_z)
 
 
-# ═══════════════════════════════════════════════════════════════
-# XSF reader (with automatic detection of the data order)
-# ═══════════════════════════════════════════════════════════════
+# ── XSF reader (with automatic detection of the data order) ────
 
 def _roughness(d):
     """Mean absolute neighbour difference over all three axes.  Correctly
@@ -132,39 +128,28 @@ def read_xsf(path, order='auto'): #step 1 in order of execution
     with open(path) as f:
         lines = f.readlines()
 
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
+    for i, ln in enumerate(lines):                  # i: the line that opens the data grid
         if 'DATAGRID_3D' in ln and 'BEGIN_BLOCK' not in ln and 'END' not in ln:
             break
-        i += 1
     else:
         sys.exit("Error: no DATAGRID_3D block found in XSF.")
-    i += 1
 
-    nx, ny, nz = map(int, lines[i].split());  i += 1
-    i += 1  # origin (ignored)
-    va = np.array(list(map(float, lines[i].split())));  i += 1
-    vb = np.array(list(map(float, lines[i].split())));  i += 1
-    vc = np.array(list(map(float, lines[i].split())));  i += 1
+    nx, ny, nz = map(int, lines[i + 1].split())
+    # lines[i + 2] is the grid origin (ignored); then the three vectors that span the grid
+    va = np.array(list(map(float, lines[i + 3].split())))
+    vb = np.array(list(map(float, lines[i + 4].split())))
+    vc = np.array(list(map(float, lines[i + 5].split())))
 
     vals = []
-    while i < len(lines) and len(vals) < nx * ny * nz:
-        if 'END_DATAGRID' in lines[i]:
+    for ln in lines[i + 6:]:
+        if len(vals) >= nx * ny * nz or 'END_DATAGRID' in ln:
             break
-        vals.extend(float(x) for x in lines[i].split())
-        i += 1
-
+        vals.extend(float(x) for x in ln.split())
     if len(vals) < nx * ny * nz:
         sys.exit(f"Error: too few data points ({len(vals)} < {nx*ny*nz}).")
 
-    data, used = _reshape_xsf(vals, nx, ny, nz, order)
-
-    ax_ang = np.linalg.norm(va)
-    by_ang = np.linalg.norm(vb)
-    cz_ang = np.linalg.norm(vc)
-
-    return data, (ax_ang, by_ang, cz_ang), (nx, ny, nz)
+    data, _ = _reshape_xsf(vals, nx, ny, nz, order)
+    return data, (np.linalg.norm(va), np.linalg.norm(vb), np.linalg.norm(vc)), (nx, ny, nz)
 
 
 def drop_periodic_duplicates(data):
@@ -194,9 +179,20 @@ def drop_periodic_duplicates(data):
     return data
 
 
-# ═══════════════════════════════════════════════════════════════
-# cfg parser (ixchel crystruct.cfg)
-# ═══════════════════════════════════════════════════════════════
+# ── cfg parser (ixchel crystruct.cfg) ──────────────────────────
+
+def _block_end(text, start):
+    """Index of the '}' that closes the '{' at text[start]; len(text) if it is never closed."""
+    depth = 0
+    for j in range(start, len(text)):
+        if text[j] == '{':
+            depth += 1
+        elif text[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(text)
+
 
 def parse_cfg(cfg_path):
     """Read the layer geometry (size_uc, filename, stacking) from an ixchel cfg."""
@@ -205,69 +201,42 @@ def parse_cfg(cfg_path):
     sm = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
     if not sm:
         sys.exit("Error: stack_seq not found in cfg.")
-    seq = list(sm.group(1))
-
     lm = re.search(r'layers\s*=\s*\{', text)
     if not lm:
         sys.exit("Error: layers block not found in cfg.")
-    depth = 0; j = lm.end() - 1
-    while j < len(text):
-        if text[j] == '{':   depth += 1
-        elif text[j] == '}':
-            depth -= 1
-            if depth == 0: break
-        j += 1
-    layers_text = text[lm.end():j]
+    layers_text = text[lm.end():_block_end(text, lm.end() - 1)]
 
-    layer_defs = {}
+    layer_defs = {}                                 # label -> size and file name of that layer
     pos = 0
     while pos < len(layers_text):
         lbm = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
-        if not lbm: break
-        label = lbm.group(1)
+        if not lbm:
+            break
         bstart = pos + lbm.end() - 1
-        d = 0; p2 = bstart
-        while p2 < len(layers_text):
-            if layers_text[p2] == '{':   d += 1
-            elif layers_text[p2] == '}':
-                d -= 1
-                if d == 0: break
-            p2 += 1
-        block = layers_text[bstart+1:p2]
+        bend = _block_end(layers_text, bstart)
+        block = layers_text[bstart + 1:bend]
         su = re.search(
             r'size_uc\s*=\s*\{[^}]*x\s*=\s*([0-9.E+\-]+)[^}]*'
             r'y\s*=\s*([0-9.E+\-]+)[^}]*z\s*=\s*([0-9.E+\-]+)', block)
         fn_m = re.search(r'filename\s*=\s*\"([^\"]+)\"', block)
-        if not su or not fn_m:
-            pos = p2 + 1; continue
-        layer_defs[label] = {
-            'ax': float(su.group(1)),
-            'by': float(su.group(2)),
-            'cz': float(su.group(3)),
-            'filename': fn_m.group(1),
-        }
-        pos = p2 + 1
+        if su and fn_m:
+            layer_defs[lbm.group(1)] = {'ax': float(su.group(1)), 'by': float(su.group(2)),
+                                        'cz': float(su.group(3)), 'filename': fn_m.group(1)}
+        pos = bend + 1
 
     layers = []
     z0 = 0.0
-    for label in seq:
+    for label in sm.group(1):                       # the stacking sequence, one letter per layer
         if label not in layer_defs:
             sys.exit(f"Error: layer '{label}' not defined in layers block.")
         ld = layer_defs[label]
-        layers.append({
-            'label': label,
-            'ax': ld['ax'], 'by': ld['by'], 'cz': ld['cz'],
-            'z0': z0,
-            'filename': ld['filename'],
-        })
+        layers.append({'label': label, 'ax': ld['ax'], 'by': ld['by'], 'cz': ld['cz'],
+                       'z0': z0, 'filename': ld['filename']})
         z0 += ld['cz']
-
     return {'layers': layers, 'total_z': z0}
 
 
-# ═══════════════════════════════════════════════════════════════
-# Nearest-neighbour cutoff (Kurasch et al. 2011, p. 397 and Fig. 3)
-# ═══════════════════════════════════════════════════════════════
+# ── nearest-neighbour cutoff (Kurasch et al. 2011, p. 397 and Fig. 3) ──
 
 def _footprint(stencil, size):
     """Neighbourhood used to pick the replacement value.
@@ -354,9 +323,7 @@ def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
     return data, int(flagged.sum()) - remaining
 
 
-# ═══════════════════════════════════════════════════════════════
-# Projection along an axis-parallel beam direction
-# ═══════════════════════════════════════════════════════════════
+# ── projection along an axis-parallel beam direction ───────────
 
 def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     """
@@ -372,26 +339,17 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
         n_slices : number of voxel planes summed
     """
     h, k, l = miller
-    ax_ang, by_ang, cz_ang = cell_ang
-    nx, ny, nz = shape
-
-    nonzero = [x for x in [h, k, l] if x != 0]
-    if len(nonzero) != 1:
+    if len([x for x in (h, k, l) if x != 0]) != 1:
         sys.exit(
             f"Error: Miller index [{h}{k}{l}] not supported.\n"
             f"  Only [001], [100], [010] (axis-parallel projections) are possible."
         )
-
-    if l != 0:       # [001]: beam along c, sum over axis 2
-        n_pts = nz;   span = cz_ang;   axis = 2
-    elif h != 0:     # [100]: beam along a, sum over axis 0
-        n_pts = nx;   span = ax_ang;   axis = 0
-    else:            # [010]: beam along b, sum over axis 1
-        n_pts = ny;   span = by_ang;   axis = 1
+    axis = 2 if l != 0 else 0 if h != 0 else 1      # beam along c for [001], a for [100], b for [010]
 
     # periodic grid: n_pts unique planes at i*span/n_pts (duplicate end plane
     # of the XSF general grid already removed)
-    d_proj = span / n_pts                       # voxel size [Å]
+    n_pts, span = shape[axis], cell_ang[axis]
+    d_proj = span / n_pts                           # voxel size [Å]
 
     # map the layer boundaries (from the cfg) onto voxel planes
     i_lo = int(round(z0_ang            / span * n_pts))
@@ -399,24 +357,16 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
     i_lo = max(0, min(i_lo, n_pts))
     i_hi = max(0, min(i_hi, n_pts))
     n_slices = i_hi - i_lo
-
     if n_slices == 0:
         return None, d_proj, 0
 
-    if axis == 2:
-        proj = data_cut[:, :, i_lo:i_hi].sum(axis=2)   # [nx, ny]
-    elif axis == 0:
-        proj = data_cut[i_lo:i_hi, :, :].sum(axis=0)   # [ny, nz]
-    else:
-        proj = data_cut[:, i_lo:i_hi, :].sum(axis=1)   # [nx, nz]
-
-    proj_yx = proj.T   # ixchel: [nrow=y, ncol=x]
-    return proj_yx, d_proj, n_slices
+    window = [slice(None)] * 3
+    window[axis] = slice(i_lo, i_hi)                # the planes of this layer, everything across
+    proj = data_cut[tuple(window)].sum(axis=axis)
+    return proj.T, d_proj, n_slices                 # ixchel: [nrow=y, ncol=x]
 
 
-# ═══════════════════════════════════════════════════════════════
-# TIFF output (ixchel format)
-# ═══════════════════════════════════════════════════════════════
+# ── TIFF output (ixchel format) ────────────────────────────────
 
 def write_ixchel_tiff(filename, data_yx):
     """Write an ixchel-compatible TIFF: page 0 RGB preview, page 1 float32 data,
@@ -427,7 +377,7 @@ def write_ixchel_tiff(filename, data_yx):
     if vmax == vmin:
         vmax = vmin + 1e-6
     preview = np.clip((data - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-    preview_rgb = np.stack([preview, preview, preview], axis=-1)
+    preview_rgb = np.stack([preview] * 3, axis=-1)
     meta = np.zeros((1, 2), dtype=np.uint32)
     with tifffile.TiffWriter(filename) as tfw:
         tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
@@ -436,23 +386,17 @@ def write_ixchel_tiff(filename, data_yx):
     print(f"    -> {filename}  [{vmin:.4g} ... {vmax:.4g}] 1/Å")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════
+# ── main ───────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(
-        description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
-    ap.add_argument('--xsf',    required=True,
+    ap = argparse.ArgumentParser(description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
+    ap.add_argument('--xsf', required=True,
                     help='total Coulomb potential as XSF (3ddens on case.vcoul; for CXY/CYZ '
                          'lattices use lapw5grid.py, 3ddens misses the centring atoms)')
-    ap.add_argument('--cfg',    required=True,
-                    help='ixchel crystruct.cfg (layer geometry)')
-    ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1],
-                    metavar=('H', 'K', 'L'),
+    ap.add_argument('--cfg', required=True, help='ixchel crystruct.cfg (layer geometry)')
+    ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1], metavar=('H', 'K', 'L'),
                     help='beam direction (default: 0 0 1)')
-    ap.add_argument('--order',  choices=['auto', 'F', 'C'], default='auto',
-                    help='XSF data order (default: auto)')
+    ap.add_argument('--order', choices=['auto', 'F', 'C'], default='auto', help='XSF data order (default: auto)')
     ap.add_argument('--cutoff', type=float, default=50000,
                     help='cutoff magnitude in volt, the sign is ignored: voxels with '
                          'V_C < -|cutoff| are replaced (default: 50000, paper: -50 kV)')
@@ -463,8 +407,7 @@ def main():
                          "or 'lowest' (earlier behaviour); see apply_nn_cutoff()")
     ap.add_argument('--no-normalize', action='store_true',
                     help='skip the paper normalisation (smallest V_s set to zero)')
-    ap.add_argument('-o', '--output', default='wien2k_ulm',
-                    help='output directory')
+    ap.add_argument('-o', '--output', default='wien2k_ulm', help='output directory')
     args = ap.parse_args()
 
     h, k, l   = args.miller
@@ -511,7 +454,7 @@ def main():
 
     # -- 4. cfg ------------------------------------------------------
     print(f"\n[4] reading cfg: {args.cfg}")
-    cfg    = parse_cfg(args.cfg)
+    cfg = parse_cfg(args.cfg)
     layers = cfg['layers']
     print(f"    {len(layers)} layer(s), total thickness {cfg['total_z']:.3f} Å,  beam [{h}{k}{l}]")
 
@@ -525,9 +468,8 @@ def main():
     print(f"\n[5] projecting layer by layer ...")
     outs = []
     for ly in layers:
-        proj_raw, d_proj, n_slices = project_layer(
-            data_cut, (ax_ang, by_ang, cz_ang), (nx, ny, nz),
-            (h, k, l), ly['z0'], ly['cz'])
+        proj_raw, d_proj, n_slices = project_layer(data_cut, (ax_ang, by_ang, cz_ang), (nx, ny, nz),
+                                                   (h, k, l), ly['z0'], ly['cz'])
         if proj_raw is None:
             print(f"\n  layer '{ly['label']}': no voxel planes in "
                   f"z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")
