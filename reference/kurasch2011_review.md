@@ -148,7 +148,6 @@ limitation of the paper's rule, not of the script.
   function as exp(i λ(1 + E/511 keV) V_z), which `check_transmission.py`
   confirms to 3.5e-8 rad.
 * XSF route: `to_kirk = d[Å] · 13.6057 [V/Ry] / 47.88` per summed voxel.
-* All labels in `compare_all_subsliced.py` now say 1/Å.
 
 ## 6. Sanity target: reproduction of Fig. 3 on graphene
 

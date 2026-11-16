@@ -10,8 +10,8 @@ ixchel-compatible TIFFs following the recipe of
     "Simulation of bonding effects in HRTEM images of light element materials",
     Beilstein J. Nanotechnol. 2, 394-404 (2011), doi:10.3762/bjnano.2.45
 
-as literally as the paper allows.  The script exists as a comparison for
-vcoul2tiff.py; deviations from the paper are bugs, not improvements.
+as literally as the paper allows; deviations from the paper are bugs, not
+improvements.
 
 Method (paper p. 397-399):
   1. Read the 3D potential from XSF  [Ry, the vectors that span the grid are in Å]
@@ -51,8 +51,7 @@ crystruct --ixchel "vx vy vz" triplet whose cfg matches it:
   [010]:  x = +a, y = +c, z = +b      crystruct --ixchel "1 0 0  0 0 1  0 1 0"
 The [010] frame is left-handed (a x c = -b).  crystruct accepts either
 handedness, so a cfg made with a right-handed triplet such as
-"-1 0 0  0 0 1  0 1 0" (the xsf2tiff_dwFactor.inplane_vectors frame) is
-mirrored in x relative to these TIFFs.
+"-1 0 0  0 0 1  0 1 0" is mirrored in x relative to these TIFFs.
 
 Layout of this file: the CORE comes first, steps 2 to 5 of the method above
 (apply_nn_cutoff, normalise, project_layer, to_kirkland).  After the core:

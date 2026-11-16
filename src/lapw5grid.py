@@ -78,9 +78,8 @@ Arguments and where they come from:
     --nproc      number of lapw5 runs at the same time (default: all cores but two)
     --workdir    directory that keeps the lapw5 input and output files of every
                  plane (default: a temporary directory, deleted afterwards)
-    -o           the XSF file to write.  It is the --xsf input of vcoul2tiff_ulm.py
-                 (potential) or the --dft / --iam input of xsf2tiff_dwFactor.py
-                 (density, written with --norm tot).
+    -o           the XSF file to write.  For a potential it is the --xsf input of
+                 vcoul2tiff_ulm.py.
 
 Layout of this file: the CORE comes first, in two parts.  Part 1 is the lapw5
 driver; it is the same for graphene and for every other crystal, because

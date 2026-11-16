@@ -14,7 +14,7 @@ function trans_<label>.tif, wave function) as a TIFF with three pages:
              is not the POSIX cksum of its cfg (tiff2ixchel.py sets it)
 
 This module is imported by the scripts that read or write such files
-(vcoul2tiff_ulm.py, xsf2tiff_dwFactor.py, tiff2ixchel.py, check_transmission.py):
+(vcoul2tiff_ulm.py, tiff2ixchel.py, check_transmission.py):
 
     from ixchel_tiff import read_ixchel_tiff, write_ixchel_tiff
 

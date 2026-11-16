@@ -350,15 +350,22 @@ Checks of the tools:
 
 ## Limits and open items
 
-* **Beam directions.** `vcoul2tiff_ulm.py` projects only along an edge of the
-  grid box ([001], [100] or [010] of the box) and takes the box as
-  rectangular: it reads the lengths of the box edges, not their directions.
+* **Other beam directions — open.** The route works when three mutually
+  perpendicular lattice vectors exist with the beam along the third: they go
+  to `lapw5grid.py --edges` and to crystruct. Graphene [001] is such a case;
+  no other direction has been run yet. `vcoul2tiff_ulm.py` projects only along
+  an edge of the grid box and reads the lengths of the box edges, not their
+  directions, so a box that is not rectangular gives wrong layers without a
+  warning.
 * **No check of the cell.** `vcoul2tiff_ulm.py` takes the lateral cell size
   from the XSF file and does not compare it with the cfg. `lapw5grid.py
   --edges` and the crystruct triplet have to be kept equal by hand.
-* **Lattice types.** `lapw5grid.py` writes grids for hexagonal (H) cells and
-  for cells with three right angles (P, B, F, CXY, CXZ, CYZ); rhombohedral (R),
-  monoclinic and triclinic cells are not supported.
+* **Oblique lattices — open.** `lapw5grid.py` writes grids for hexagonal (H)
+  cells and for cells with three right angles (P, B, F, CXY, CXZ, CYZ);
+  rhombohedral (R), monoclinic and triclinic cells are not supported. crystruct
+  writes an ixchel cfg only for three perpendicular vectors, and an ixchel
+  layer is a rectangle (`ax`, `by`). How to treat cells whose projection along
+  the beam is not rectangular is not decided.
 * **Nyquist term.** `tiff2ixchel.py` keeps only frequencies strictly below the
   Nyquist limit, so the term at the limit is dropped even when the cell fits
   the ixchel grid exactly (graphene: 2e-4 % of the spectral power). It lies

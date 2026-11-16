@@ -2,8 +2,8 @@
 """
 tiff2ixchel.py — put single-unit-cell potential TIFFs on the ixchel simulation grid
 
-vcoul2tiff.py, vcoul2tiff_ulm.py and xsf2tiff_dwFactor.py write the projected
-potential of ONE unit cell per layer, sampled at their own resolution.
+vcoul2tiff_ulm.py writes the projected potential of ONE unit cell per layer,
+sampled at the resolution of the WIEN2k grid.
 `ixchel main` instead expects every layer file to cover the whole supercell
 (NCELL[0] x NCELL[1] unit cells) on exactly `dim` pixels and aborts with
 "ERROR: Dimension mismatch" otherwise (ixchel src/ixchelfun.cpp).
@@ -20,7 +20,7 @@ the same value `ixchel atompot` writes, so ixchel does not warn about a
 foreign crystal structure.  The unit is unchanged (Kirkland units, 1/Å).
 
 Usage:
-    python3 tiff2ixchel.py --cfg Graphene_ixchel_001.cfg -i wien2k_001 -o ixchel_wien2k_001
+    python3 tiff2ixchel.py --cfg Graphene_ixchel_001.cfg -i ulm_DFT_001 -o sim_DFT
     (then run `ixchel main -c Graphene_ixchel_001.cfg -s simulation.cfg`
      in a directory where the layer files from -o are found)
 
@@ -30,9 +30,8 @@ Arguments and where they come from:
                  the run.  Read from it: dim, NCELL and the file name of every
                  layer (atompot<label>.tif); its checksum goes into the output.
     -i           the directory with the one-unit-cell layer TIFFs, i.e. the -o
-                 directory of vcoul2tiff_ulm.py (ulm_DFT_001 in the README),
-                 vcoul2tiff.py or xsf2tiff_dwFactor.py.  The name is free; the
-                 files in it carry the layer file names of the cfg.
+                 directory of vcoul2tiff_ulm.py (ulm_DFT_001 in the README).  The
+                 name is free; the files in it carry the layer file names of the cfg.
     -o           the directory for the ixchel-ready TIFFs (same file names).  Use
                  the directory in which `ixchel main` runs, ixchel looks for the
                  layer files there.
