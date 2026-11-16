@@ -54,6 +54,11 @@ handedness, so a cfg made with a right-handed triplet such as
 "-1 0 0  0 0 1  0 1 0" (the xsf2tiff_dwFactor.inplane_vectors frame) is
 mirrored in x relative to these TIFFs.
 
+Layout of this file: the CORE comes first, steps 2 to 5 of the method above
+(apply_nn_cutoff, normalise, project_layer, to_kirkland).  After the core:
+the file formats (the XSF reader of step 1, the ixchel cfg) and the command
+line, main(), which calls the five steps in order.
+
 Usage:
     python3 vcoul2tiff_ulm.py \\
         --xsf Graphene_vcoul_DFT.xsf \\
@@ -77,14 +82,185 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ixchel_tiff import write_ixchel_tiff       # noqa: E402
 
 
-# ── constants ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# CORE: the method of Kurasch et al. (2011), steps 2 to 5 of the list above
+#
+#   step 2   apply_nn_cutoff   replace the voxels at the nuclei by a neighbour's value
+#   step 3   normalise         shift the potential so that the vacuum level is zero
+#   step 4   project_layer     sum the voxel planes of one layer along the beam
+#   step 5   to_kirkland       convert the sum to the unit of ixchel, 1/Å
+#
+# Step 1, reading the XSF file, is a file format and comes after the core.
+# main() at the end of the file calls the steps in order.
+# ═══════════════════════════════════════════════════════════════
 
 BOHR      = 0.529177210903   # Bohr -> Å (not needed for XSF input, kept for reference)
 RY_TO_V   = 13.605693122994  # 1 Ry = 13.606 eV -> potential of an electron: 13.606 V
 H2_2PI_ME = 47.88            # h²/(2π m_e e) [V·Å²]  (Kirkland/ixchel unit of V_z)
 
 
-# ── XSF reader (with automatic detection of the data order) ────
+def _footprint(stencil, size):
+    """Neighbourhood used to pick the replacement value.
+    size == 3: 6 face neighbours (stencil=6) or the full 3x3x3 cube (stencil=26).
+    size  > 3: growing cube, only used for flagged voxels that have no valid
+               neighbour in the requested stencil (cluster of flagged voxels)."""
+    if stencil == 26 or size > 3:
+        return np.ones((size, size, size), dtype=bool)
+    fp = np.zeros((3, 3, 3), dtype=bool)
+    fp[1, 1, :] = fp[1, :, 1] = fp[:, 1, 1] = True
+    return fp
+
+
+def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
+    """
+    Replace voxels beyond the cutoff by a value taken from their neighbours.
+
+    Paper (p. 397): "Whenever a value in the 3D potential is higher than some
+    cutoff value, we change this value to the highest value in the neighboring
+    pixels."  This is a replacement, not a clamp: the flagged voxel takes a
+    neighbour's value, the threshold itself never appears in the data.
+
+    Flagging.  data_3d is in WIEN2k sign (V_C < 0 at the nuclei) and the paper
+    quotes its cutoff as "-50 kV", so "higher than the cutoff" is read as
+    larger in magnitude:  flagged  <=>  V_C < -cutoff_ry.
+
+    Replacement value ("highest value in the neighboring pixels"):
+      nn_value='highest' (default, the paper's reading): the neighbour with the
+        highest scattering potential V_s = -V_C, i.e. the most negative V_C —
+        the neighbour closest to the nucleus.  The flagged voxel becomes a
+        plateau at the level of its nearest neighbour.
+      nn_value='lowest': the least negative neighbour (what a maximum_filter on
+        WIEN2k-sign data gives; behaviour of earlier versions of this script).
+        This carves a dip into the potential at the nucleus and is kept only
+        for comparison.
+    For a nucleus sitting exactly on a grid point of an isotropic grid all face
+    neighbours are equal by symmetry and the two readings coincide; they differ
+    for off-grid nuclei, anisotropic voxels and clusters of flagged voxels.
+
+    Neighbourhood.  The paper says "neighboring pixels" without a stencil.
+    Default is the 6 face neighbours (the literal nearest neighbours; with
+    nn_value='highest' the 20 edge/corner voxels of a 3x3x3 cube can hardly
+    win anyway because they are farther from the nucleus); stencil=26 uses the
+    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic;
+    data_3d must therefore be the periodic grid without the duplicated XSF end
+    planes (drop_periodic_duplicates), otherwise a boundary voxel would see its
+    own flagged copy instead of its true neighbour.
+
+    Clusters.  Only voxels below the threshold are ever changed, and replacement
+    values are always taken from unflagged voxels.  A flagged voxel with a valid
+    neighbour in the requested stencil takes its value from that stencil; only
+    flagged voxels without any valid stencil neighbour (all flagged) search a
+    cube that grows shell by shell until it contains an unflagged voxel.
+
+    Returns (data, n_replaced) with n_replaced the number of voxels actually
+    replaced.
+    """
+    data = data_3d.copy()
+    flagged = data < -cutoff_ry
+    if not flagged.any():
+        return data, 0
+
+    # mask flagged voxels with +/-inf so the rank filter ignores them
+    if nn_value == 'highest':
+        rank_filter, masked = minimum_filter, np.where(flagged, np.inf, data)
+    else:
+        rank_filter, masked = maximum_filter, np.where(flagged, -np.inf, data)
+
+    todo = flagged.copy()                   # flagged voxels that still wait for a value
+    size = 3
+    for _ in range(20):
+        # nb: for every voxel the best unflagged value in its neighbourhood (+/-inf if there is none)
+        nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
+        got = todo & np.isfinite(nb)        # waiting voxels that have found a value in this round
+        data[got] = nb[got]
+        todo &= ~got
+        if not todo.any():
+            break
+        size += 2       # cluster of flagged voxels -> widen the search for the rest
+
+    remaining = int(todo.sum())
+    if remaining > 0:
+        print(f"    WARNING: {remaining} voxels still below -cutoff "
+              f"(no unflagged voxel within a {size - 2}^3 cube)")
+    return data, int(flagged.sum()) - remaining
+
+
+def normalise(data_cut):
+    """
+    Step 3: shift the potential so that its vacuum level is zero.
+
+    Paper p. 397: "the potential was shifted (i.e., smallest value was set to
+    zero)".  The smallest value of V_s = -V_C is the largest V_C (vacuum /
+    interstitial plateau), which is subtracted.  A constant shift only adds a
+    global phase in the multislice calculation, but it matters for any
+    comparison with IAM potentials, which vanish in vacuum.
+
+    Returns (shifted data, v_ref); v_ref is the value that was subtracted [Ry].
+    """
+    v_ref = float(data_cut.max())
+    return data_cut - v_ref, v_ref
+
+
+def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
+    """
+    Sum the 3D potential over the voxels of one ixchel layer along the beam.
+
+    data_cut and shape describe the periodic grid (duplicate XSF end planes
+    already removed): n points per axis, voxel size L/n.  Image frame: see
+    the module docstring.
+
+    Returns:
+        proj_yx  : 2D array [nrow=y, ncol=x] in Ry (plain sum, no unit factor)
+        d_proj   : voxel size along the projection axis [Å]
+        n_slices : number of voxel planes summed
+    """
+    h, k, l = miller
+    if len([x for x in (h, k, l) if x != 0]) != 1:
+        sys.exit(
+            f"Error: Miller index [{h}{k}{l}] not supported.\n"
+            f"  Only [001], [100], [010] (axis-parallel projections) are possible."
+        )
+    axis = 2 if l != 0 else 0 if h != 0 else 1      # beam along c for [001], a for [100], b for [010]
+
+    # periodic grid: n_pts unique planes at i*span/n_pts (duplicate end plane
+    # of the XSF general grid already removed)
+    n_pts, span = shape[axis], cell_ang[axis]
+    d_proj = span / n_pts                           # voxel size [Å]
+
+    # map the layer boundaries (from the cfg) onto voxel planes
+    i_lo = int(round(z0_ang            / span * n_pts))
+    i_hi = int(round((z0_ang + cz_lay) / span * n_pts))
+    i_lo = max(0, min(i_lo, n_pts))
+    i_hi = max(0, min(i_hi, n_pts))
+    n_slices = i_hi - i_lo
+    if n_slices == 0:
+        return None, d_proj, 0
+
+    window = [slice(None)] * 3
+    window[axis] = slice(i_lo, i_hi)                # the planes of this layer, everything across
+    proj = data_cut[tuple(window)].sum(axis=axis)
+    return proj.T, d_proj, n_slices                 # ixchel: [nrow=y, ncol=x]
+
+
+def to_kirkland(proj_raw, d_proj):
+    """
+    Step 5: the sum over the voxel planes of a layer in Kirkland units, as ixchel reads it.
+
+    Unit chain:
+      proj_raw [Ry]  = sum of V_C over the voxel planes (from project_layer)
+      V_z [V·Å]      = -proj_raw * d_proj[Å] * RY_TO_V[V/Ry]     (V_s = -V_C)
+      V_z [1/Å]      = V_z [V·Å] / H2_2PI_ME [V·Å²]
+    There is no Bohr factor: the XSF spans are in Å.
+    """
+    to_kirk = d_proj * RY_TO_V / H2_2PI_ME
+    return -proj_raw * to_kirk
+
+
+# ═══════════════════════════════════════════════════════════════
+# END OF CORE.  Below: file formats (XSF, ixchel cfg), command line
+# ═══════════════════════════════════════════════════════════════
+
+# ── file format: the XSF reader, step 1 (with automatic detection of the data order) ──
 
 def _roughness(d):
     """Mean absolute neighbour difference over all three axes.  Correctly
@@ -189,7 +365,7 @@ def drop_periodic_duplicates(data):
     return data
 
 
-# ── cfg parser (ixchel crystruct.cfg) ──────────────────────────
+# ── file format: the ixchel cfg written by crystruct (layer sizes, stacking) ──
 
 def _block_end(text, start):
     """Index of the '}' that closes the '{' at text[start]; len(text) if it is never closed."""
@@ -259,138 +435,7 @@ def parse_cfg(cfg_path):
     return {'layers': layers, 'total_z': z0}
 
 
-# ── nearest-neighbour cutoff (Kurasch et al. 2011, p. 397 and Fig. 3) ──
-
-def _footprint(stencil, size):
-    """Neighbourhood used to pick the replacement value.
-    size == 3: 6 face neighbours (stencil=6) or the full 3x3x3 cube (stencil=26).
-    size  > 3: growing cube, only used for flagged voxels that have no valid
-               neighbour in the requested stencil (cluster of flagged voxels)."""
-    if stencil == 26 or size > 3:
-        return np.ones((size, size, size), dtype=bool)
-    fp = np.zeros((3, 3, 3), dtype=bool)
-    fp[1, 1, :] = fp[1, :, 1] = fp[:, 1, 1] = True
-    return fp
-
-
-def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
-    """
-    Replace voxels beyond the cutoff by a value taken from their neighbours.
-
-    Paper (p. 397): "Whenever a value in the 3D potential is higher than some
-    cutoff value, we change this value to the highest value in the neighboring
-    pixels."  This is a replacement, not a clamp: the flagged voxel takes a
-    neighbour's value, the threshold itself never appears in the data.
-
-    Flagging.  data_3d is in WIEN2k sign (V_C < 0 at the nuclei) and the paper
-    quotes its cutoff as "-50 kV", so "higher than the cutoff" is read as
-    larger in magnitude:  flagged  <=>  V_C < -cutoff_ry.
-
-    Replacement value ("highest value in the neighboring pixels"):
-      nn_value='highest' (default, the paper's reading): the neighbour with the
-        highest scattering potential V_s = -V_C, i.e. the most negative V_C —
-        the neighbour closest to the nucleus.  The flagged voxel becomes a
-        plateau at the level of its nearest neighbour.
-      nn_value='lowest': the least negative neighbour (what a maximum_filter on
-        WIEN2k-sign data gives; behaviour of earlier versions of this script).
-        This carves a dip into the potential at the nucleus and is kept only
-        for comparison.
-    For a nucleus sitting exactly on a grid point of an isotropic grid all face
-    neighbours are equal by symmetry and the two readings coincide; they differ
-    for off-grid nuclei, anisotropic voxels and clusters of flagged voxels.
-
-    Neighbourhood.  The paper says "neighboring pixels" without a stencil.
-    Default is the 6 face neighbours (the literal nearest neighbours; with
-    nn_value='highest' the 20 edge/corner voxels of a 3x3x3 cube can hardly
-    win anyway because they are farther from the nucleus); stencil=26 uses the
-    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic;
-    data_3d must therefore be the periodic grid without the duplicated XSF end
-    planes (drop_periodic_duplicates), otherwise a boundary voxel would see its
-    own flagged copy instead of its true neighbour.
-
-    Clusters.  Only voxels below the threshold are ever changed, and replacement
-    values are always taken from unflagged voxels.  A flagged voxel with a valid
-    neighbour in the requested stencil takes its value from that stencil; only
-    flagged voxels without any valid stencil neighbour (all flagged) search a
-    cube that grows shell by shell until it contains an unflagged voxel.
-
-    Returns (data, n_replaced) with n_replaced the number of voxels actually
-    replaced.
-    """
-    data = data_3d.copy()
-    flagged = data < -cutoff_ry
-    if not flagged.any():
-        return data, 0
-
-    # mask flagged voxels with +/-inf so the rank filter ignores them
-    if nn_value == 'highest':
-        rank_filter, masked = minimum_filter, np.where(flagged, np.inf, data)
-    else:
-        rank_filter, masked = maximum_filter, np.where(flagged, -np.inf, data)
-
-    todo = flagged.copy()                   # flagged voxels that still wait for a value
-    size = 3
-    for _ in range(20):
-        # nb: for every voxel the best unflagged value in its neighbourhood (+/-inf if there is none)
-        nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
-        got = todo & np.isfinite(nb)        # waiting voxels that have found a value in this round
-        data[got] = nb[got]
-        todo &= ~got
-        if not todo.any():
-            break
-        size += 2       # cluster of flagged voxels -> widen the search for the rest
-
-    remaining = int(todo.sum())
-    if remaining > 0:
-        print(f"    WARNING: {remaining} voxels still below -cutoff "
-              f"(no unflagged voxel within a {size - 2}^3 cube)")
-    return data, int(flagged.sum()) - remaining
-
-
-# ── projection along an axis-parallel beam direction ───────────
-
-def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
-    """
-    Sum the 3D potential over the voxels of one ixchel layer along the beam.
-
-    data_cut and shape describe the periodic grid (duplicate XSF end planes
-    already removed): n points per axis, voxel size L/n.  Image frame: see
-    the module docstring.
-
-    Returns:
-        proj_yx  : 2D array [nrow=y, ncol=x] in Ry (plain sum, no unit factor)
-        d_proj   : voxel size along the projection axis [Å]
-        n_slices : number of voxel planes summed
-    """
-    h, k, l = miller
-    if len([x for x in (h, k, l) if x != 0]) != 1:
-        sys.exit(
-            f"Error: Miller index [{h}{k}{l}] not supported.\n"
-            f"  Only [001], [100], [010] (axis-parallel projections) are possible."
-        )
-    axis = 2 if l != 0 else 0 if h != 0 else 1      # beam along c for [001], a for [100], b for [010]
-
-    # periodic grid: n_pts unique planes at i*span/n_pts (duplicate end plane
-    # of the XSF general grid already removed)
-    n_pts, span = shape[axis], cell_ang[axis]
-    d_proj = span / n_pts                           # voxel size [Å]
-
-    # map the layer boundaries (from the cfg) onto voxel planes
-    i_lo = int(round(z0_ang            / span * n_pts))
-    i_hi = int(round((z0_ang + cz_lay) / span * n_pts))
-    i_lo = max(0, min(i_lo, n_pts))
-    i_hi = max(0, min(i_hi, n_pts))
-    n_slices = i_hi - i_lo
-    if n_slices == 0:
-        return None, d_proj, 0
-
-    window = [slice(None)] * 3
-    window[axis] = slice(i_lo, i_hi)                # the planes of this layer, everything across
-    proj = data_cut[tuple(window)].sum(axis=axis)
-    return proj.T, d_proj, n_slices                 # ixchel: [nrow=y, ncol=x]
-
-
-# ── main ───────────────────────────────────────────────────────
+# ── command line: the five steps in order ──────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
@@ -443,32 +488,21 @@ def main():
     print(f"    V_C (after cutoff): [{data_cut.min()*RY_TO_V:.0f}, {data_cut.max()*RY_TO_V:.2f}] V")
 
     # -- 3. normalisation --------------------------------------------
-    # Paper p. 397: shift so that the smallest value of V_s = -V_C is zero,
-    # i.e. subtract the largest V_C (vacuum / interstitial plateau).  A constant
-    # shift only adds a global phase in the multislice calculation, but it
-    # matters for any comparison with IAM potentials, which vanish in vacuum.
     if args.no_normalize:
         v_ref = 0.0
         print(f"\n[3] normalisation skipped (--no-normalize)")
     else:
-        v_ref = float(data_cut.max())
-        data_cut = data_cut - v_ref
+        data_cut, v_ref = normalise(data_cut)
         print(f"\n[3] normalisation: V_C shifted by -{v_ref:.5f} Ry = -{v_ref*RY_TO_V:.3f} V "
               f"so that min(V_s) = 0")
 
-    # -- 4. cfg ------------------------------------------------------
+    # -- the layers from the cfg -------------------------------------
     print(f"\n[4] reading cfg: {args.cfg}")
     cfg = parse_cfg(args.cfg)
     layers = cfg['layers']
     print(f"    {len(layers)} layer(s), total thickness {cfg['total_z']:.3f} Å,  beam [{h}{k}{l}]")
 
-    # -- 5. projection per layer -------------------------------------
-    #
-    # unit chain:
-    #   proj_raw [Ry]  = sum of V_C over n_slices voxels
-    #   V_z [V·Å]      = -proj_raw * d_proj[Å] * RY_TO_V[V/Ry]     (V_s = -V_C)
-    #   V_z [1/Å]      = V_z [V·Å] / H2_2PI_ME [V·Å²]
-    # => to_kirk = d_proj * RY_TO_V / H2_2PI_ME  (no Bohr factor: XSF spans are in Å)
+    # -- 4./5. projection per layer, conversion to 1/Å, TIFF ---------
     print(f"\n[5] projecting layer by layer ...")
     outs = []
     for ly in layers:
@@ -478,8 +512,7 @@ def main():
             print(f"\n  layer '{ly['label']}': no voxel planes in "
                   f"z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")
             continue
-        to_kirk  = d_proj * RY_TO_V / H2_2PI_ME
-        proj_yx  = -proj_raw * to_kirk   # V_s = -V_C
+        proj_yx = to_kirkland(proj_raw, d_proj)
         print(f"\n  layer '{ly['label']}': z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å  "
               f"({n_slices} planes, d = {d_proj*1000:.1f} mÅ)")
         print(f"    V_z: [{proj_yx.min():.4f}, {proj_yx.max():.4f}] 1/Å"
