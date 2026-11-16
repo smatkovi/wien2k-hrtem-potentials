@@ -45,16 +45,25 @@ read_potential_tiff = read_ixchel_tiff      # former name, still imported by che
 def parse_cfg(cfg_path):
     """Return dim (None if absent), NCELL (ixchel default 1×1) and the unique
     layer filenames of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
-    text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())          # without comments
+    text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())          # the cfg without its comments
 
-    def pair(key):                                                      # key = [n, m]  or  key : (n, m)
+    def pair(key):
+        """The first two integers of an entry like 'dim = [ 1008, 1008];' or 'NCELL = [ 14, 8, 1];'
+        (None if the cfg has no such entry)."""
         m = re.search(rf'\b{key}\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
         return (int(m.group(1)), int(m.group(2))) if m else None
 
-    filenames = list(dict.fromkeys(re.findall(r'\bfilename\s*[=:]\s*"([^"]+)"', text)))   # unique, in order
+    dim = pair('dim')
+    ncell = pair('NCELL') or (1, 1)
+
+    # the entries 'filename = "atompota.tif";' of the layers: every name once, in the order of the file
+    filenames = []
+    for name in re.findall(r'\bfilename\s*[=:]\s*"([^"]+)"', text):
+        if name not in filenames:
+            filenames.append(name)
     if not filenames:
         sys.exit(f"Error: no layer 'filename' entries in {cfg_path}")
-    return pair('dim'), pair('NCELL') or (1, 1), filenames
+    return dim, ncell, filenames
 
 
 def posix_cksum(path):
@@ -62,16 +71,17 @@ def posix_cksum(path):
     to Checksums::cksum in ixchel and to the coreutils `cksum` command."""
     data = Path(path).read_bytes()
     crc = 0
-    for b in data:
+    for b in data:                                  # 1. every byte of the file
         crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ b) & 0xFF]
     n = len(data)
-    while n > 0:
+    while n > 0:                                    # 2. then the length of the file, lowest byte first
         crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ (n & 0xFF)) & 0xFF]
         n >>= 8
-    return (~crc) & 0xFFFFFFFF
+    return (~crc) & 0xFFFFFFFF                      # 3. all 32 bits inverted
 
 
 def _make_cksum_table():
+    """The table of the CRC above: one 32-bit entry for each of the 256 byte values."""
     table = []
     for i in range(256):
         c = i << 24
@@ -99,12 +109,15 @@ def tile_fourier(uc, ncell, dim):
     uc    : [ny_uc, nx_uc] one period, pixel (0,0) at the cell origin
     ncell : (NCx, NCy) unit cells in the ixchel supercell
     dim   : (Nx, Ny) ixchel grid
-    returns [Ny, Nx] supercell sampled on the ixchel grid
+    returns the supercell sampled on the ixchel grid, [Ny, Nx], and the fraction of the
+    spectral power that had to be dropped because it lies above a Nyquist limit
     """
     ny_uc, nx_uc = uc.shape
     ncx, ncy = ncell
     Nx, Ny = dim
 
+    # Fourier coefficients of one unit cell.  kx, ky count the periods per unit cell; the same wave has
+    # kx * ncx and ky * ncy periods across the supercell of ncx x ncy cells.
     coef = np.fft.fft2(uc) / uc.size                       # c[ky, kx]
     kx = np.fft.fftfreq(nx_uc, d=1.0 / nx_uc).astype(int)  # integer UC harmonics
     ky = np.fft.fftfreq(ny_uc, d=1.0 / ny_uc).astype(int)
@@ -115,6 +128,7 @@ def tile_fourier(uc, ncell, dim):
     keep = ((2 * np.abs(kx)[None, :] < nx_uc) & (2 * np.abs(ky)[:, None] < ny_uc) &
             (2 * np.abs(KX) < Nx) & (2 * np.abs(KY) < Ny))
 
+    # every kept coefficient goes to its place in the spectrum of the supercell grid; transform back
     target = np.zeros((Ny, Nx), dtype=complex)
     np.add.at(target, (KY[keep] % Ny, KX[keep] % Nx), coef[keep])
     out = np.fft.ifft2(target) * (Nx * Ny)
