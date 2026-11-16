@@ -16,6 +16,12 @@ a = 2.461 Å; cell size read from <casedir>/Graphene_ixchel_001.cfg) drawn with
 armchair horizontal, so that bonds run horizontally as in the paper's Fig. 4, and
 tiled 2 x 4, i.e. about the field of the paper's B/O supercell.
 
+Layout of this file: the CORE comes first, the two functions that define the
+numbers of the comparison (ring_mask: which pixels belong to the red rings;
+integrated_changes: the change DFT vs IAM inside, outside and in total).
+After the core: the input (cell from the cfg, V_z from the TIFFs) and main(),
+which draws the figure.
+
 Usage:
     python3 plot_dft_iam_maps.py <casedir> <out.png>
 """
@@ -37,6 +43,43 @@ INK, INK2, GRID = '#0b0b0b', '#52514e', '#d9d8d3'
 BLUE, ORANGE, MID, RED = '#2a78d6', '#eb6834', '#f0efec', '#e34948'
 SEQ = ['#cde2fb', '#86b6ef', '#3987e5', '#256abf', '#184f95', '#0d366b']
 
+
+# ═══════════════════════════════════════════════════════════════
+# CORE: the numbers of the comparison
+#
+# The maps themselves are simple: diff = DFT - IAM and rel = diff / IAM, pixel
+# by pixel (first lines of main).  These two functions define the areas and
+# the integrated changes of panel g (paper Fig. 6 e).
+# ═══════════════════════════════════════════════════════════════
+
+def ring_mask(shape, radius, atoms, a_zz, b_ac):
+    """Pixels within `radius` Å of any atom of one periodic cell."""
+    n_ac, n_zz = shape
+    u = (np.arange(n_ac) / n_ac)[:, None]           # position of every pixel row (armchair), as a fraction of the cell
+    v = (np.arange(n_zz) / n_zz)[None, :]           # the same for every pixel column (zigzag)
+    mask = np.zeros(shape, bool)
+    for fu, fv in atoms:
+        du = (u - fu + 0.5) % 1.0 - 0.5             # distance to the atom, to its nearest periodic image,
+        dv = (v - fv + 0.5) % 1.0 - 0.5             # in fractions of the cell: always within -1/2 ... 1/2
+        mask |= np.hypot(du * b_ac, dv * a_zz) <= radius            # the distance in Å
+    return mask
+
+
+def integrated_changes(iam, dft, ring):
+    """Change of the summed V_z, DFT against IAM, in per cent: over the whole cell ('cell', the change
+    of the mean inner potential), inside the rings ('ring') and outside them ('rest')."""
+    return {
+        'cell': (dft.sum() / iam.sum() - 1) * 100,
+        'ring': (dft[ring].sum() / iam[ring].sum() - 1) * 100,
+        'rest': (dft[~ring].sum() / iam[~ring].sum() - 1) * 100,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# END OF CORE.  Below: the input (cfg, TIFFs) and the figure
+# ═══════════════════════════════════════════════════════════════
+
+# ── input ──────────────────────────────────────────────────────
 
 def read_cell(casedir):
     """Cell size (zigzag x, armchair y) [Å] and the atoms as (armchair, zigzag)
@@ -61,18 +104,7 @@ def load(casedir, kind):
     return d.astype(np.float64) * H2
 
 
-def ring_mask(shape, radius, atoms, a_zz, b_ac):
-    """Pixels within `radius` Å of any atom of one periodic cell."""
-    n_ac, n_zz = shape
-    u = (np.arange(n_ac) / n_ac)[:, None]           # position of every pixel row (armchair), as a fraction of the cell
-    v = (np.arange(n_zz) / n_zz)[None, :]           # the same for every pixel column (zigzag)
-    mask = np.zeros(shape, bool)
-    for fu, fv in atoms:
-        du = (u - fu + 0.5) % 1.0 - 0.5             # distance to the atom, to its nearest periodic image,
-        dv = (v - fv + 0.5) % 1.0 - 0.5             # in fractions of the cell: always within -1/2 ... 1/2
-        mask |= np.hypot(du * b_ac, dv * a_zz) <= radius            # the distance in Å
-    return mask
-
+# ── the figure and the command line ────────────────────────────
 
 def main():
     casedir, out = sys.argv[1], sys.argv[2]
@@ -86,11 +118,7 @@ def main():
 
     bond = b_ac / 3                                 # C-C bond length: the armchair period holds three of them
     ring = ring_mask(iam.shape, bond / 4, atoms, a_zz, b_ac)      # red ring: diameter = bond / 2
-    stats = {
-        'cell': (dft.sum() / iam.sum() - 1) * 100,
-        'ring': (dft[ring].sum() / iam[ring].sum() - 1) * 100,
-        'rest': (dft[~ring].sum() / iam[~ring].sum() - 1) * 100,
-    }
+    stats = integrated_changes(iam, dft, ring)
 
     # ── the figure: maps a-d in the upper row, line scan e, f and the numbers g in the lower row ──
     # tile(): the cell repeated NT_AC x NT_ZZ times for display
