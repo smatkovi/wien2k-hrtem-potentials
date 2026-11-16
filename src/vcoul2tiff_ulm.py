@@ -233,9 +233,9 @@ def parse_cfg(cfg_path):
         label_match = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
         if not label_match:
             break
-        block_start = pos + label_match.end() - 1               # the '{' of this layer
-        block_end = _block_end(layers_text, block_start)        # and its '}'
-        block = layers_text[block_start + 1:block_end]
+        open_brace = pos + label_match.end() - 1                # the '{' of this layer
+        close_brace = _block_end(layers_text, open_brace)       # and the '}' that belongs to it
+        block = layers_text[open_brace + 1:close_brace]
         size_match = re.search(
             r'size_uc\s*=\s*\{[^}]*x\s*=\s*([0-9.E+\-]+)[^}]*'
             r'y\s*=\s*([0-9.E+\-]+)[^}]*z\s*=\s*([0-9.E+\-]+)', block)
@@ -244,7 +244,7 @@ def parse_cfg(cfg_path):
             layer_defs[label_match.group(1)] = {
                 'ax': float(size_match.group(1)), 'by': float(size_match.group(2)),
                 'cz': float(size_match.group(3)), 'filename': file_match.group(1)}
-        pos = block_end + 1
+        pos = close_brace + 1
 
     # the layers in stacking order; z0 is the depth at which a layer starts
     layers = []
