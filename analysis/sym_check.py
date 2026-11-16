@@ -29,8 +29,6 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 from lapw5grid import BOHR, Lapw5Runner, read_struct   # noqa: E402
 

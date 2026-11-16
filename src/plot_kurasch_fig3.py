@@ -282,16 +282,12 @@ def nn_replace(G, rule):
     return H
 
 
-results = {}
+ic = int(np.argmin(np.abs(xg)))                   # centre pixel of the 30 ppÅ subgrid
 for rule in ('max', 'min'):
-    H = nn_replace(G, rule)
-    Vz = H.sum(axis=1) * dz
-    results[rule] = Vz
-    ic = int(np.argmin(np.abs(xg)))
+    Vz = nn_replace(G, rule).sum(axis=1) * dz
     print(f"red[{rule}]: centre pixel V_z = {Vz[ic]:.0f} V*A, next pixels {Vz[ic+1]:.0f}, {Vz[ic+2]:.0f}; "
           f"ratio ideal/red = {blue[0]/Vz[ic]:.2f} (paper-style/red = {blue_green[0]/Vz[ic]:.2f})")
 Vz_nocut = G.sum(axis=1) * dz
-ic = int(np.argmin(np.abs(xg)))
 print(f"no cutoff (30 ppA): centre pixel V_z = {Vz_nocut[ic]:.0f} V*A, ratio to ideal = {Vz_nocut[ic]/blue[0]:.1f} "
       f"(to paper-style = {Vz_nocut[ic]/blue_green[0]:.1f})")
 
