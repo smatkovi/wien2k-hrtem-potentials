@@ -36,28 +36,21 @@ import numpy as np
 import tifffile
 
 
-# ═══════════════════════════════════════════════════════════════
-# cfg parsing (only what the tiling needs)
-# ═══════════════════════════════════════════════════════════════
+# ── cfg parsing (only what the tiling needs) ───────────────────
 
 def parse_cfg(cfg_path):
     """Return dim (None if absent), NCELL (ixchel default 1×1) and the unique
     layer filenames of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
-    text = Path(cfg_path).read_text()
-    text_nc = re.sub(r'#[^\n]*', '', text)          # drop comments
+    text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())          # without comments
 
-    dim_m = re.search(r'\bdim\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text_nc)
-    ncell_m = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text_nc)
-    dim = (int(dim_m.group(1)), int(dim_m.group(2))) if dim_m else None
-    ncell = (int(ncell_m.group(1)), int(ncell_m.group(2))) if ncell_m else (1, 1)
+    def pair(key):                                                      # key = [n, m]  or  key : (n, m)
+        m = re.search(rf'\b{key}\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
+        return (int(m.group(1)), int(m.group(2))) if m else None
 
-    filenames = []
-    for m in re.finditer(r'\bfilename\s*[=:]\s*"([^"]+)"', text_nc):
-        if m.group(1) not in filenames:
-            filenames.append(m.group(1))
+    filenames = list(dict.fromkeys(re.findall(r'\bfilename\s*[=:]\s*"([^"]+)"', text)))   # unique, in order
     if not filenames:
         sys.exit(f"Error: no layer 'filename' entries in {cfg_path}")
-    return dim, ncell, filenames
+    return pair('dim'), pair('NCELL') or (1, 1), filenames
 
 
 def posix_cksum(path):
@@ -65,12 +58,11 @@ def posix_cksum(path):
     to Checksums::cksum in ixchel and to the coreutils `cksum` command."""
     data = Path(path).read_bytes()
     crc = 0
-    table = _CKSUM_TABLE
     for b in data:
-        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ b) & 0xFF]
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ b) & 0xFF]
     n = len(data)
     while n > 0:
-        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ (n & 0xFF)) & 0xFF]
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ (n & 0xFF)) & 0xFF]
         n >>= 8
     return (~crc) & 0xFFFFFFFF
 
@@ -88,9 +80,7 @@ def _make_cksum_table():
 _CKSUM_TABLE = _make_cksum_table()
 
 
-# ═══════════════════════════════════════════════════════════════
-# TIFF I/O (ixchel layout: page 0 RGB preview, page 1 float32, page 2 checksums)
-# ═══════════════════════════════════════════════════════════════
+# ── TIFF I/O (ixchel layout: page 0 RGB preview, page 1 float32, page 2 checksums) ──
 
 def read_potential_tiff(path):
     with tifffile.TiffFile(str(path)) as tif:
@@ -115,9 +105,7 @@ def write_ixchel_tiff(filename, data_yx, cksum_cry):
         tfw.write(meta,        photometric='minisblack', contiguous=False)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Tiling + Fourier resampling
-# ═══════════════════════════════════════════════════════════════
+# ── tiling + Fourier resampling ────────────────────────────────
 
 def has_duplicate_edges(uc):
     """True if the last row and column repeat the first ones (XSF general-grid
@@ -158,13 +146,10 @@ def tile_fourier(uc, ncell, dim):
     return out.real, dropped
 
 
-# ═══════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════
+# ── main ───────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(
-        description='Tile single-unit-cell potential TIFFs onto the ixchel dim grid')
+    ap = argparse.ArgumentParser(description='Tile single-unit-cell potential TIFFs onto the ixchel dim grid')
     ap.add_argument('--cfg', required=True, help='ixchel crystal-structure cfg (dim, NCELL, layer filenames)')
     ap.add_argument('-i', '--input', required=True, help='directory with one-unit-cell layer TIFFs')
     ap.add_argument('-o', '--output', required=True, help='output directory for ixchel-ready TIFFs')
@@ -182,8 +167,7 @@ def main():
     if dim is None:
         sys.exit(f"Error: no 'dim' in {args.cfg} and no --dim given (ixchel main needs dim)")
     cksum = posix_cksum(args.cfg)
-    print(f"cfg {args.cfg}: dim = {dim[0]} x {dim[1]}, NCELL = {ncell[0]} x {ncell[1]}, "
-          f"cksum = {cksum}")
+    print(f"cfg {args.cfg}: dim = {dim[0]} x {dim[1]}, NCELL = {ncell[0]} x {ncell[1]}, cksum = {cksum}")
     if Path(args.input).resolve() == Path(args.output).resolve():
         sys.exit("Error: input and output directory must differ")
 
