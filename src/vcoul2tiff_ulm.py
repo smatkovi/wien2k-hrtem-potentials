@@ -331,7 +331,7 @@ def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
     todo = flagged.copy()                   # flagged voxels that still wait for a value
     size = 3
     for _ in range(20):
-        # nb: for every voxel the best unflagged value in its neighbourhood (inf if there is none)
+        # nb: for every voxel the best unflagged value in its neighbourhood (+/-inf if there is none)
         nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
         got = todo & np.isfinite(nb)        # waiting voxels that have found a value in this round
         data[got] = nb[got]

@@ -110,7 +110,7 @@ def tile_fourier(uc, ncell, dim):
     ncell : (NCx, NCy) unit cells in the ixchel supercell
     dim   : (Nx, Ny) ixchel grid
     returns the supercell sampled on the ixchel grid, [Ny, Nx], and the fraction of the
-    spectral power that had to be dropped because it lies above a Nyquist limit
+    spectral power that had to be dropped because it lies at or above a Nyquist limit
     """
     ny_uc, nx_uc = uc.shape
     ncx, ncy = ncell

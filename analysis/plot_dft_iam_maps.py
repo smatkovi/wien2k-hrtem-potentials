@@ -93,7 +93,8 @@ def main():
     }
 
     # ── the figure: maps a-d in the upper row, line scan e, f and the numbers g in the lower row ──
-    tile = lambda a: np.tile(a, (NT_AC, NT_ZZ))    # noqa: E731   (the cell repeated for display)
+    # tile(): the cell repeated NT_AC x NT_ZZ times for display
+    tile = lambda a: np.tile(a, (NT_AC, NT_ZZ))    # noqa: E731
     ext = [0, NT_AC * b_ac, 0, NT_ZZ * a_zz]        # size of the displayed area [Å]: armchair, zigzag
 
     plt.rcParams.update({'font.size': 9, 'axes.edgecolor': INK2, 'axes.labelcolor': INK,
