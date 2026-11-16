@@ -464,6 +464,9 @@ def main():
     cutoff_Ry = cutoff_V / RY_TO_V      # 50000 V / 13.606 V/Ry ~ 3675 Ry
     out_dir   = args.output
 
+    # The numbers in brackets that are printed, [1] ... [5], are the numbering of the log, not the steps
+    # of the method: [4] is the cfg and [5] the projection together with the unit conversion.
+
     # -- 1. read XSF -------------------------------------------------
     print(f"\n[1] reading XSF: {args.xsf}")
     data_3d, (ax_ang, by_ang, cz_ang), (nx, ny, nz) = read_xsf(args.xsf, args.order)
