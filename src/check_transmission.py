@@ -19,6 +19,22 @@ Usage:
         --pot atompota.tif --trans trans_a.tif \\
         [--ref-pot ../iam/atompota.tif --ref-trans ../iam/trans_a.tif]
 
+Arguments and where they come from (all are files of one `ixchel main` run):
+    --crystal    the crystal-structure cfg given to `ixchel main -c`: written by
+                 crystruct --ixchel, with the dim and NCELL of the run.  Read
+                 from it: size_uc and NCELL (the size of the supercell).
+    --sim        the simulation cfg given to `ixchel main -s` (written by hand).
+                 Read from it: dim and v0 (acceleration voltage, gives λ and σ).
+                 It must contain `writeTrans = 1;`.
+    --pot        the layer potential ixchel read, atompot<label>.tif in the run
+                 directory: the output of tiff2ixchel.py (DFT route) or of
+                 `ixchel atompot` (IAM).  <label> is the layer label of the cfg.
+    --trans      trans_<label>.tif, written by `ixchel main` into the run
+                 directory because of writeTrans.
+    --ref-pot, --ref-trans
+                 the same two files of a second run (e.g. the IAM run in another
+                 directory); optional.
+
 Layout of this file: the CORE comes first, the two formulas behind
 t = exp(i σ V_bl): wavelength_and_sigma gives σ, band_limit gives V_bl.
 After the core: the file formats (complex TIFF, cfg values) and the command

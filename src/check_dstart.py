@@ -19,9 +19,16 @@ Checks on case.outputd against case.struct:
 Exit status 0 if everything passes, 1 otherwise.  Rerun `x dstart` until the
 check passes; only a stale case.rsp needs `x lstart` first.
 
-Usage (in the case directory):
+Usage (in the case directory, right after `x dstart`):
     python3 check_dstart.py Graphene
     python3 check_dstart.py --outputd Graphene.outputd --struct Graphene.struct
+
+Arguments and where they come from:
+    Graphene     the WIEN2k case name (the name of the case directory and of its
+                 files); short for the two options below
+    --outputd    case.outputd, the log file that `x dstart` has just written
+    --struct     case.struct, the structure file of the case (the one the case
+                 was initialised with)
 
 Dependencies: none beyond the standard library
 """

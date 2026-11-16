@@ -7,8 +7,8 @@ Displayed is the projected electrostatic potential V_z(x,y) in
 Kirkland units [1/Å] (= V·Å / 47.88 V·Å²), as stored in the ixchel TIFFs.
 
 Both sides are reduced to one unit cell with identical geometry:
-  WIEN2k:  wien2k_{direction}/atompot*.tif  (output of vcoul2tiffFourier.py)
-  ixchel:  ixchel_{direction}/atompot*.tif  (output of ixchel image)
+  WIEN2k:  wien2k_{direction}/atompot*.tif  (output of xsf2tiff_dwFactor.py or vcoul2tiff.py)
+  ixchel:  ixchel_{direction}/atompot*.tif  (output of ixchel atompot)
 
 A WIEN2k TIFF with the ixchel dim shape covers the NCELL supercell; any other
 shape is ONE unit cell (periodic grid, no repeated edge) and is first
@@ -21,7 +21,20 @@ dim/NCELL is not an integer.
 
 Usage:
     cd ~/wien2k_tests/Rutile
-    python3 compare_all.py -p Rutile_v4 -d 001 100 110
+    python3 compare_all_subsliced.py -p Rutile_v4 -d 001 100 110
+
+Arguments and where they come from:
+    (current directory)  the material directory.  It must hold, per direction,
+                 wien2k_<dir>/ (written by xsf2tiff_dwFactor.py or vcoul2tiff.py
+                 with -o wien2k_<dir>) and ixchel_<dir>/ (the directory in which
+                 `ixchel atompot` was run: its atompot*.tif and the crystruct cfg,
+                 from which NCELL, dim and size_uc are read).
+    -p, --prefix only names the output figure, <prefix>_subslicing_comparison.png
+                 (default Rutile)
+    -d, --directions
+                 the <dir> parts of the directory names, i.e. the beam directions
+                 as written when the directories were made (001, 100, 110).
+                 Default: every wien2k_* directory that has a matching ixchel_*.
 """
 
 import numpy as np

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-xsf2tiff.py  —  WIEN2k 3ddens XSF → ixchel projected potential
+xsf2tiff_dwFactor.py  —  WIEN2k 3ddens XSF → ixchel projected potential
 
 METHOD (--iam, recommended):
   V_proj = V_Kirkland_IAM + ΔV_proj(Drho)
@@ -62,11 +62,30 @@ Dependencies:
     numpy, scipy, tifffile, pylibconfig2
 
 Usage:
-    python3 xsf2tiff.py \\
+    python3 xsf2tiff_dwFactor.py \\
         --dft Rutile_DFT_total.xsf --iam Rutile_IAM_total.xsf \\
         --struct Rutile.struct \\
         --miller 1 0 0 --cfg Rutile_ixchel_100.cfg \\
         -o wien2k_100
+
+Arguments and where they come from:
+    --dft        the total electron density of the converged SCF on a 3D grid:
+                 an XSF written by 3ddens from case.clmsum (for CXY/CYZ lattices by
+                 lapw5grid.py --clm case.clmsum --norm tot instead)
+    --iam        the same for the superposed-atom density: case.clmsum as written
+                 by `x dstart`, exported with the same grid.  Required: the
+                 script stops without it.
+    --struct     case.struct of the case
+    --cfg        the ixchel crystal-structure cfg for this beam direction, written
+                 by crystruct --ixchel "<triplet>" case.struct.  Read from it: the
+                 layers (ax, by, cz, atoms, file names), NCELL, dim, subslicing.
+    --miller     beam direction h k l in units of the conventional cell (default
+                 0 0 1); must be the direction the cfg was made for
+    --bfactors   Elem:B pairs that replace the automatic B-factors, e.g.
+                 Ti:0.30 O:0.80 (see B-FACTORS)
+    --nsteps     integration steps along the beam per layer (default 80)
+    -o           output directory (default wien2k_<hkl>); it is the -i input of
+                 tiff2ixchel.py and the WIEN2k side of compare_all_subsliced.py
 """
 
 import argparse, re, sys

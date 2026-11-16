@@ -39,6 +39,18 @@ the reference curves and the plot.
 Usage:
     python3 plot_kurasch_fig3.py Graphene.rho_fig3 kurasch_fig3_graphene.png [case.vcoul case.struct]
     (case.vcoul / case.struct default to <case>.vcoul / <case>.struct next to the rho file)
+
+Arguments (by position) and where they come from:
+    1  Graphene.rho_fig3   the potential on the x-z plane, written by
+                 `lapw5c lapw5_fig3.def` in the case directory.  The .def file and
+                 the plane definition Graphene.in5_fig3 are in reference/lapw5_fig3_hex/
+                 (hexagonal cell) and reference/lapw5_fig3/ (CXY cell); the .def
+                 names the file to evaluate (Graphene.vcoul, unit 9) and this
+                 output file (unit 21).  The variants *_3000 sample x at 3000 ppÅ.
+    2  kurasch_fig3_graphene.png   the figure to write
+    3  case.vcoul   the same potential file lapw5 evaluated (written by `x lapw0`);
+                 its spherical part is needed for the outline curve
+    4  case.struct  the structure file of the case
 """
 import re
 import sys

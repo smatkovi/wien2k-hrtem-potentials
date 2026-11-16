@@ -67,6 +67,29 @@ Usage:
         [--cutoff 50000] [--stencil 6|26] [--nn-value highest|lowest] \\
         [--no-normalize] [--order auto|F|C] [-o wien2k_ulm_001]
 
+Arguments and where they come from:
+    --xsf        the Coulomb potential on a 3D grid: the -o file of lapw5grid.py
+                 --clm case.vcoul_DFT (or case.vcoul_IAM) --grid NX NY NZ.  The grid
+                 box must be the cell of the cfg (lapw5grid --edges = crystruct
+                 triplet).
+    --cfg        the ixchel crystal-structure cfg for this beam direction, written
+                 by crystruct --ixchel "<triplet>" case.struct (triplets: see
+                 "Supported beam directions" above).  Read from it: the layers
+                 (thickness cz, file names).  The lateral cell size is taken from
+                 the XSF and not compared with the cfg.
+    --miller     beam direction h k l in units of the grid box axes; only 0 0 1,
+                 1 0 0 and 0 1 0 (default 0 0 1)
+    --cutoff     magnitude of the cutoff in volt (default 50000 = the paper's
+                 -50 kV); see step 2
+    --stencil    which neighbours supply the replacement value: the 6 face
+                 neighbours (default) or all 26
+    --nn-value   highest (paper, default) or lowest scattering potential among the
+                 neighbours
+    --no-normalize  skip step 3 (smallest V_s set to zero)
+    --order      data order of the XSF (default auto; F = x fastest, C = z fastest)
+    -o           output directory (default wien2k_ulm); one TIFF per layer, named
+                 as in the cfg.  It is the -i input of tiff2ixchel.py.
+
 Dependencies: numpy, scipy, tifffile
 """
 

@@ -24,6 +24,23 @@ Usage:
     (then run `ixchel main -c Graphene_ixchel_001.cfg -s simulation.cfg`
      in a directory where the layer files from -o are found)
 
+Arguments and where they come from:
+    --cfg        the crystal-structure cfg that `ixchel main -c` will get: written
+                 by crystruct --ixchel, with dim and NCELL set to the values of
+                 the run.  Read from it: dim, NCELL and the file name of every
+                 layer (atompot<label>.tif); its checksum goes into the output.
+    -i           the directory with the one-unit-cell layer TIFFs, i.e. the -o
+                 directory of vcoul2tiff.py (wien2k_001 in the README),
+                 vcoul2tiff_ulm.py or xsf2tiff_dwFactor.py.  The name is free; the
+                 files in it carry the layer file names of the cfg.
+    -o           the directory for the ixchel-ready TIFFs (same file names).  Use
+                 the directory in which `ixchel main` runs, ixchel looks for the
+                 layer files there.
+    --dim        NX NY, replaces the dim of the cfg; it must equal dim in the
+                 simulation cfg given to `ixchel main -s`
+    --drop-edges only for foreign TIFFs that repeat their first row and column;
+                 the scripts of this repository never write such files
+
 Layout of this file: the CORE comes first, tile_fourier, which turns one unit
 cell into the supercell on the ixchel grid.  After the core: the ixchel cfg
 and its checksum, a check of the input and the command line.

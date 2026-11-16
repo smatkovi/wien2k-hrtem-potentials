@@ -59,6 +59,35 @@ Usage:
         [--miller 0 0 1 | --frame 1 0 0  0 1 0  0 0 1] [--dz 0.05] [--dx 0.025] \\
         [--vacuum-depth 7.5] -o wien2k_001
 
+Arguments and where they come from:
+    --vcoul-dft  case.vcoul of the converged SCF: written by `x lapw0` in the last
+                 cycle of run_lapw (case.in0 line 2 must say R2V), then copied by
+                 hand to case.vcoul_DFT (README, step 1)
+    --vcoul-iam  case.vcoul of the superposed atoms: `x dstart`, then `x lapw0`,
+                 then copied to case.vcoul_IAM (check the dstart run with
+                 check_dstart.py)
+    --struct     case.struct of the case; both vcoul files belong to it
+    --cfg        the ixchel crystal-structure cfg for this beam direction, written
+                 by crystruct --ixchel "<triplet>" case.struct.  Read from it: the
+                 layers (ax, by, cz, atoms, file names) and the stacking.
+    --frame      the nine numbers of that crystruct triplet (x, y and beam direction
+                 in units of the conventional cell vectors); must be the same
+                 numbers the cfg was made with
+    --miller     alternative to --frame: only the beam direction h k l; the in-plane
+                 axes are then chosen by xsf2tiff_dwFactor.inplane_vectors
+    --dx         wanted pixel size of the output TIFF [Å] (default 0.025)
+    --dz         step along the beam for the ΔV integral [Å] (default 0.05; see
+                 CONVERGENCE)
+    --vacuum-depth  depth [Å] of a plane in the vacuum, counted as in the cfg
+                 (first atomic plane = 0); 7.5 is the middle of the 15 Å graphene
+                 cell.  See POTENTIAL ZERO.
+    --bfactors   Elem:B pairs that replace the built-in Debye-Waller factors of
+                 the Kirkland term, e.g. Ti:0.30 O:0.80
+    --nproc, --nshell, --workdir   passed on to lapw5grid.Lapw5Runner (parallel
+                 lapw5 runs, neighbour shells, keep the lapw5 files)
+    -o           output directory (default wien2k_<direction>); it is the -i input
+                 of tiff2ixchel.py
+
 Dependencies: numpy, scipy, tifffile, pylibconfig2; lapw5 on PATH ($WIENROOT)
 """
 

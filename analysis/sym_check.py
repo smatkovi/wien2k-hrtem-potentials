@@ -23,6 +23,16 @@ Evaluated with lapw5c (via lapw5grid.Lapw5Runner):
 
 Usage:
     python3 sym_check.py <casedir> <clmsum> <vcoul> [--p1 X Y] [--p2 X Y] [--nz N]
+
+Arguments and where they come from:
+    <casedir>    the WIEN2k case directory; Graphene.struct is read from it
+    <clmsum>     file name inside <casedir> of the total density to test:
+                 Graphene.clmsum (SCF) or a copy of the `x dstart` density
+    <vcoul>      file name inside <casedir> of the Coulomb potential that belongs
+                 to it (written by `x lapw0`), e.g. Graphene.vcoul_DFT
+    --p1, --p2   the two points to compare, X Y in fractional coordinates of the
+                 conventional cell (defaults: the two bond centres of the CXY cell)
+    --nz         points along z, both ends included (default 451 = 30 ppÅ at 15 Å)
 """
 import argparse
 import sys

@@ -16,6 +16,12 @@ Prints
 
 Usage:
     python3 mip_compare.py <casedir>
+
+Argument and where it comes from:
+    <casedir>    the run directory of the Kurasch route (default: the current
+                 directory).  Read from it, for K = DFT and IAM:
+                   Graphene_vcoul_<K>_ongrid.xsf   written by lapw5grid.py
+                   ulm_<K>_001/atompota.tif        written by vcoul2tiff_ulm.py
 """
 import sys
 from pathlib import Path

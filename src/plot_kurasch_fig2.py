@@ -25,6 +25,21 @@ Both are normalised as in the paper: V_s = -V_C, smallest value set to zero.
 Usage:
     python3 plot_kurasch_fig2.py --vcoul C_single.vcoul --struct C_single.struct [-o fig2.png]
     python3 plot_kurasch_fig2.py --xsf C_single_vcoul.xsf [--order auto|F|C] [-o fig2.png]
+
+Arguments and where they come from:
+    --vcoul      case.vcoul of the single-atom case (one C atom in a 10 Å cube,
+                 reference/fig2_C_single/C_single.struct), written by `x lapw0`
+                 (case.in0 line 2: R2V) on the `x dstart` density, i.e. before
+                 any SCF cycle
+    --struct     case.struct of that case (needed with --vcoul)
+    --xsf        instead of --vcoul: the same potential already on a 3D grid, an
+                 XSF written by lapw5grid.py or 3ddens
+    --ppa        points per Å of the line scan (default 250, the paper's value)
+    --axis       lattice axis of the line scan: 0, 1, 2 = a, b, c (default 0)
+    --Z          nuclear charge for the bare Coulomb curve Z e²/r (default 6)
+    --symbol     element of the Kirkland and Doyle-Turner curves (default C)
+    --order      data order of the XSF (default auto; F = x fastest, C = z fastest)
+    -o           the figure to write (default kurasch_fig2.png)
 """
 import argparse, itertools, sys
 from pathlib import Path

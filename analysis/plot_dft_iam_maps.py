@@ -24,6 +24,13 @@ which draws the figure.
 
 Usage:
     python3 plot_dft_iam_maps.py <casedir> <out.png>
+
+Arguments and where they come from:
+    <casedir>    the run directory of the Kurasch route.  Read from it:
+                   Graphene_ixchel_001.cfg         the crystruct cfg (cell size, atoms)
+                   ulm_DFT_001/atompota.tif        written by vcoul2tiff_ulm.py
+                   ulm_IAM_001/atompota.tif        (the same from case.vcoul_IAM)
+    <out.png>    the figure to write
 """
 import re
 import sys

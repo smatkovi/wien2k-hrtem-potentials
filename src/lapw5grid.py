@@ -50,6 +50,38 @@ The edges must be lattice translations, otherwise the last planes are not
 periodic images of the first (a warning is printed).  The XSF then lists the
 grid cell as the crystal cell.
 
+Arguments and where they come from:
+    --struct     case.struct of the WIEN2k case.  lapw5 reads lattice, atoms and
+                 symmetry from it; this script reads the cell and the atoms.
+    --clm        the file to evaluate, any clm-type file of the case:
+                 case.vcoul   Coulomb potential, written by `x lapw0` when line 2
+                              of case.in0 says R2V (not NR2V)
+                 case.clmsum  total density, written by the SCF cycle or by
+                              `x dstart` (superposed atoms)
+                 In the DFT-vs-IAM workflow these are copies made by hand (README,
+                 step 1): case.vcoul_DFT after the SCF, case.vcoul_IAM after
+                 `x dstart` + `x lapw0`.
+    --sub        optional second file of the same kind; lapw5 subtracts it from
+                 --clm before the values are written (e.g. case.vcoul_IAM)
+    --norm       how lapw5 scales the spherical (L=0) part: val for potentials and
+                 valence densities (default), tot for case.clmsum
+    --grid       NX NY NZ, the number of points along the three grid edges, both
+                 end points included.  Chosen by the user: (N-1) / edge length is
+                 the sampling rate (the paper uses 30 points per Å), and N-1
+                 should have small prime factors and put the nuclei on grid points.
+    --edges      nine numbers, the three edge vectors of the grid box (default: the
+                 conventional cell).  Choose the cell the ixchel cfg describes,
+                 i.e. the same triplet as given to crystruct --ixchel.
+    --origin     where the box starts (default 0 0 0)
+    --nshell     smallest NSHELL (neighbour shells) passed to lapw5 (default 2 2 2);
+                 raised automatically where a plane needs more
+    --nproc      number of lapw5 runs at the same time (default: all cores but two)
+    --workdir    directory that keeps the lapw5 input and output files of every
+                 plane (default: a temporary directory, deleted afterwards)
+    -o           the XSF file to write.  It is the --xsf input of vcoul2tiff_ulm.py
+                 (potential) or the --dft / --iam input of xsf2tiff_dwFactor.py
+                 (density, written with --norm tot).
+
 Layout of this file: the CORE comes first, in two parts.  Part 1 is the lapw5
 driver; it is the same for graphene and for every other crystal, because
 lapw5 reads case.struct itself.  Part 2 holds the lattice types.  After the
