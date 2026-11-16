@@ -24,6 +24,10 @@ Usage:
     (then run `ixchel main -c Graphene_ixchel_001.cfg -s simulation.cfg`
      in a directory where the layer files from -o are found)
 
+Layout of this file: the CORE comes first, tile_fourier, which turns one unit
+cell into the supercell on the ixchel grid.  After the core: the ixchel cfg
+and its checksum, a check of the input and the command line.
+
 Dependencies: numpy, tifffile
 """
 
@@ -40,7 +44,54 @@ from ixchel_tiff import read_ixchel_tiff, write_ixchel_tiff     # noqa: E402
 read_potential_tiff = read_ixchel_tiff      # former name, still imported by check scripts
 
 
-# ── cfg parsing (only what the tiling needs) ───────────────────
+# ═══════════════════════════════════════════════════════════════
+# CORE: one unit cell -> the ixchel supercell grid
+#
+# The potential is periodic, so it is a sum of plane waves.  tile_fourier takes
+# the waves of the unit-cell image and evaluates them on the pixels of the
+# supercell (NCELL cells on dim pixels): tiling and resampling in one step.
+# ═══════════════════════════════════════════════════════════════
+
+def tile_fourier(uc, ncell, dim):
+    """
+    uc    : [ny_uc, nx_uc] one period, pixel (0,0) at the cell origin
+    ncell : (NCx, NCy) unit cells in the ixchel supercell
+    dim   : (Nx, Ny) ixchel grid
+    returns the supercell sampled on the ixchel grid, [Ny, Nx], and the fraction of the
+    spectral power that had to be dropped because it lies at or above a Nyquist limit
+    """
+    ny_uc, nx_uc = uc.shape
+    ncx, ncy = ncell
+    Nx, Ny = dim
+
+    # Fourier coefficients of one unit cell.  kx, ky count the periods per unit cell; the same wave has
+    # kx * ncx and ky * ncy periods across the supercell of ncx x ncy cells.
+    coef = np.fft.fft2(uc) / uc.size                       # c[ky, kx]
+    kx = np.fft.fftfreq(nx_uc, d=1.0 / nx_uc).astype(int)  # integer UC harmonics
+    ky = np.fft.fftfreq(ny_uc, d=1.0 / ny_uc).astype(int)
+    KX, KY = np.meshgrid(kx * ncx, ky * ncy)               # supercell harmonics
+
+    # keep strictly below the Nyquist frequency of both grids so that +k and -k
+    # are always kept or dropped together (result stays real)
+    keep = ((2 * np.abs(kx)[None, :] < nx_uc) & (2 * np.abs(ky)[:, None] < ny_uc) &
+            (2 * np.abs(KX) < Nx) & (2 * np.abs(KY) < Ny))
+
+    # every kept coefficient goes to its place in the spectrum of the supercell grid; transform back
+    target = np.zeros((Ny, Nx), dtype=complex)
+    np.add.at(target, (KY[keep] % Ny, KX[keep] % Nx), coef[keep])
+    out = np.fft.ifft2(target) * (Nx * Ny)
+    imag = float(np.max(np.abs(out.imag)))
+    if imag > 1e-6 * max(float(np.max(np.abs(out.real))), 1e-30):
+        print(f"    WARNING: imaginary residue {imag:.3g} after resampling")
+    dropped = 1.0 - float(np.sum(np.abs(coef[keep])**2) / np.sum(np.abs(coef)**2))
+    return out.real, dropped
+
+
+# ═══════════════════════════════════════════════════════════════
+# END OF CORE.  Below: the ixchel cfg and its checksum, a check, command line
+# ═══════════════════════════════════════════════════════════════
+
+# ── file format: the ixchel cfg (only what the tiling needs) and its checksum ──
 
 def parse_cfg(cfg_path):
     """Return dim (None if absent), NCELL (ixchel default 1×1) and the unique
@@ -94,7 +145,7 @@ def _make_cksum_table():
 _CKSUM_TABLE = _make_cksum_table()
 
 
-# ── tiling + Fourier resampling ────────────────────────────────
+# ── check of the input ─────────────────────────────────────────
 
 def has_duplicate_edges(uc):
     """True if the last row and column repeat the first ones (XSF general-grid
@@ -104,42 +155,7 @@ def has_duplicate_edges(uc):
             np.max(np.abs(uc[:, 0] - uc[:, -1])) <= tol)
 
 
-def tile_fourier(uc, ncell, dim):
-    """
-    uc    : [ny_uc, nx_uc] one period, pixel (0,0) at the cell origin
-    ncell : (NCx, NCy) unit cells in the ixchel supercell
-    dim   : (Nx, Ny) ixchel grid
-    returns the supercell sampled on the ixchel grid, [Ny, Nx], and the fraction of the
-    spectral power that had to be dropped because it lies at or above a Nyquist limit
-    """
-    ny_uc, nx_uc = uc.shape
-    ncx, ncy = ncell
-    Nx, Ny = dim
-
-    # Fourier coefficients of one unit cell.  kx, ky count the periods per unit cell; the same wave has
-    # kx * ncx and ky * ncy periods across the supercell of ncx x ncy cells.
-    coef = np.fft.fft2(uc) / uc.size                       # c[ky, kx]
-    kx = np.fft.fftfreq(nx_uc, d=1.0 / nx_uc).astype(int)  # integer UC harmonics
-    ky = np.fft.fftfreq(ny_uc, d=1.0 / ny_uc).astype(int)
-    KX, KY = np.meshgrid(kx * ncx, ky * ncy)               # supercell harmonics
-
-    # keep strictly below the Nyquist frequency of both grids so that +k and -k
-    # are always kept or dropped together (result stays real)
-    keep = ((2 * np.abs(kx)[None, :] < nx_uc) & (2 * np.abs(ky)[:, None] < ny_uc) &
-            (2 * np.abs(KX) < Nx) & (2 * np.abs(KY) < Ny))
-
-    # every kept coefficient goes to its place in the spectrum of the supercell grid; transform back
-    target = np.zeros((Ny, Nx), dtype=complex)
-    np.add.at(target, (KY[keep] % Ny, KX[keep] % Nx), coef[keep])
-    out = np.fft.ifft2(target) * (Nx * Ny)
-    imag = float(np.max(np.abs(out.imag)))
-    if imag > 1e-6 * max(float(np.max(np.abs(out.real))), 1e-30):
-        print(f"    WARNING: imaginary residue {imag:.3g} after resampling")
-    dropped = 1.0 - float(np.sum(np.abs(coef[keep])**2) / np.sum(np.abs(coef)**2))
-    return out.real, dropped
-
-
-# ── main ───────────────────────────────────────────────────────
+# ── command line ───────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description='Tile single-unit-cell potential TIFFs onto the ixchel dim grid')
