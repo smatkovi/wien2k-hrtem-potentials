@@ -84,8 +84,12 @@ BOHR = 0.529177210903   # Bohr -> Å
 # every other lattice type take exactly this path.
 # ═══════════════════════════════════════════════════════════════
 
-# file list of one lapw5 run (Fortran unit, file): 5 input, 6 log, 8 struct, 9 the clm file,
-# 11 the clm file to subtract, 21 the values on the plane
+# The file list ("def file") that lapw5c gets as its only argument, one line per Fortran unit:
+#     5  the input file, written in plane()         9  the file to evaluate
+#     6  the log of lapw5                          11  the file to subtract (only with clm_b)
+#     8  the struct file                           21  the result: the values on the plane
+#    10, 12, 20  further files that lapw5 opens; this script does not read them
+# {tag} becomes the name of the plane, so that several lapw5 runs can work side by side.
 DEF = """\
 5 ,'{tag}.in5','old','formatted',0
 6 ,'{tag}.output5','unknown','formatted',0
@@ -100,100 +104,148 @@ DEF = """\
 
 
 class Lapw5Runner:
-    """Evaluate clm_a (optionally clm_a - clm_b) on planes with lapw5."""
+    """Evaluate clm_a (optionally clm_a - clm_b) on planes with lapw5.
+
+        runner = Lapw5Runner('case.struct', 'case.vcoul')      # prepares a working directory
+        data = runner.grid3d(origin, edges, (nx, ny, nz))      # one lapw5c run per plane
+        runner.close()                                         # removes the temporary directory
+    """
 
     def __init__(self, struct_path, clm_a, clm_b=None, norm='val', nshell=(2, 2, 2),
                  workdir=None, nproc=None, keep=False):
+        """struct_path  the case.struct file
+        clm_a        the file to evaluate (case.vcoul, case.clmsum, ...)
+        clm_b        optional second file: lapw5 then returns clm_a - clm_b
+        norm         'val' or 'tot' (see the module docstring)
+        nshell       smallest NSHELL given to lapw5; raised per plane if needed
+        workdir      directory in which lapw5 runs (default: a temporary one)
+        nproc        number of lapw5 runs at the same time (default: all cores but two)
+        keep         do not delete the lapw5 files afterwards"""
         self.norm = norm.upper()
         check_inputs(self.norm, [clm_a] + ([clm_b] if clm_b else []))     # stops here if something is missing
-        self.sub = clm_b is not None
-        self.nshell = nshell            # minimum; raised per plane if needed
+        self.sub = clm_b is not None    # True: lapw5 subtracts clm_b
+        self.nshell = nshell
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
         self.keep = keep
-        self._tmp = tempfile.mkdtemp(prefix='lapw5grid_') if workdir is None else None
-        self.wd = Path(self._tmp or workdir)            # temporary unless a workdir is given
+
+        # the working directory: lapw5 runs here, nothing is written into the case directory
+        self._tmp = None                # the temporary directory, if this object created one
+        if workdir is None:
+            self._tmp = tempfile.mkdtemp(prefix='lapw5grid_')
+            workdir = self._tmp
+        self.wd = Path(workdir)
         self.wd.mkdir(parents=True, exist_ok=True)
+
+        # links with fixed names, so that every def file can say 'case.struct', 'clm_a' and 'clm_b'
         for name, src in (('case.struct', struct_path), ('clm_a', clm_a), ('clm_b', clm_b)):
             (self.wd / name).unlink(missing_ok=True)    # stale link of an earlier run
             if src:
                 (self.wd / name).symlink_to(Path(src).resolve())
-        self._counter = 0
-        self._grid_calls = 0
+
+        self._counter = 0               # numbers the planes of direct plane() calls
+        self._grid_calls = 0            # numbers the grid3d() calls
 
     def grid3d(self, origin, edges, counts, progress=True):
         """Values at origin + i/(n0-1) e0 + j/(n1-1) e1 + k/(n2-1) e2 for all
-        i < n0, j < n1, k < n2 (end points included).  Planes are taken normal to
-        the axis with the fewest points and run in parallel.  Returns [n0, n1, n2]."""
+        i < n0, j < n1, k < n2 (end points included).  The grid is computed plane by
+        plane, several planes at the same time.  Returns an array [n0, n1, n2]."""
         origin = np.asarray(origin, float)
         edges = [np.asarray(e, float) for e in edges]
         counts = [int(n) for n in counts]
         if min(counts) < 2:
             raise ValueError("every axis needs at least 2 points")
-        k = int(np.argmin(counts))
-        p, q = [ax for ax in range(3) if ax != k]
-        nk = counts[k]
+
+        # lapw5 computes one plane per run.  The planes are stacked along the axis with the fewest
+        # points (fewest runs); the other two axes become the x and y edge of every plane.
+        stack_axis = int(np.argmin(counts))
+        x_axis, y_axis = [ax for ax in range(3) if ax != stack_axis]
+        n_planes = counts[stack_axis]
         self._grid_calls += 1
         call = self._grid_calls                 # file names unique across calls (--workdir)
 
-        def job(m):
-            o = origin + edges[k] * (m / (nk - 1))
-            return self.plane(o, o + edges[p], o + edges[q], counts[p], counts[q], tag=f"g{call:03d}_{m:05d}")
+        def one_plane(m):
+            """Plane number m: its origin lies m/(n_planes-1) of the way along the stacking edge."""
+            o = origin + edges[stack_axis] * (m / (n_planes - 1))
+            return self.plane(o, o + edges[x_axis], o + edges[y_axis], counts[x_axis], counts[y_axis],
+                              tag=f"g{call:03d}_{m:05d}")
 
+        # nproc planes at a time.  Threads are enough: each one only waits for its lapw5c process.
         planes = []
-        with ThreadPoolExecutor(max_workers=self.nproc) as ex:
-            for plane in ex.map(job, range(nk)):                    # results arrive in the order of m
-                planes.append(plane)
-                if progress and (len(planes) % max(1, nk // 10) == 0 or len(planes) == nk):
-                    print(f"    lapw5 planes {len(planes)}/{nk}", flush=True)
-        return np.stack(planes, axis=k)
+        with ThreadPoolExecutor(max_workers=self.nproc) as pool:
+            for values in pool.map(one_plane, range(n_planes)):         # results arrive in the order of m
+                planes.append(values)
+                if progress and (len(planes) % max(1, n_planes // 10) == 0 or len(planes) == n_planes):
+                    print(f"    lapw5 planes {len(planes)}/{n_planes}", flush=True)
+        return np.stack(planes, axis=stack_axis)
 
     def plane(self, origin, xend, yend, npx, npy, tag=None):
         """Values on the npx x npy grid origin + i/(npx-1)(xend-origin) + j/(npy-1)(yend-origin)
         (fractional coordinates of the conventional cell).  Returns [npx, npy]."""
-        if tag is None:
+        if tag is None:                             # called directly, not from grid3d: number the plane here
             self._counter += 1
             tag = f"p{self._counter:05d}"
         wd = self.wd
-        # lapw5 looks for muffin-tin spheres only among the cell origins
-        # -NSHELL..+NSHELL, so every corner of the plane must lie well inside
+
+        # 1. NSHELL: lapw5 looks for muffin-tin spheres only among the cell origins
+        #    -NSHELL..+NSHELL, so every corner of the plane must lie well inside
         o, x, y = (np.asarray(v, float) for v in (origin, xend, yend))
-        reach = np.abs([o, x, y, x + y - o]).max(axis=0)            # farthest corner along each cell axis
-        nshell = [max(int(s), math.ceil(r - 1e-9) + 1) for s, r in zip(self.nshell, reach)]
-        in5 = ["%d %d %d %d" % _int_vector(v) for v in (origin, xend, yend)]
-        in5 += ["%d %d %d" % tuple(nshell), "%d %d" % (npx, npy), "RHO SUB " if self.sub else "RHO     ",
-                f"ATU {self.norm} NODEBUG", "NONORTHO"]
+        corners = [o, x, y, x + y - o]                              # the fourth one lies opposite the origin
+        reach = np.abs(corners).max(axis=0)                         # farthest corner along each cell axis
+        nshell = [max(int(minimum), math.ceil(far - 1e-9) + 1) for minimum, far in zip(self.nshell, reach)]
+
+        # 2. the input file of lapw5, one list entry per line of the file
+        in5 = ["%d %d %d %d" % _int_vector(origin),        # origin of the plane, as IX IY IZ IDV (see _int_vector)
+               "%d %d %d %d" % _int_vector(xend),          # end point of its x edge
+               "%d %d %d %d" % _int_vector(yend),          # end point of its y edge
+               "%d %d %d" % tuple(nshell),                 # NSHELL along the three cell axes
+               "%d %d" % (npx, npy),                       # number of points along the x and the y edge
+               "RHO SUB " if self.sub else "RHO     ",     # evaluate the file; SUB: minus the second file
+               f"ATU {self.norm} NODEBUG",                 # atomic units; normalisation VAL or TOT
+               "NONORTHO"]                                 # the two edges need not be perpendicular
         (wd / f"{tag}.in5").write_text("\n".join(in5) + "\n")
+
+        # 3. the file list of this plane, from the template DEF
         (wd / f"{tag}.def").write_text(DEF.format(tag=tag, unit11='clm_b' if self.sub else f"{tag}.none"))
+
+        # 4. run lapw5c in the working directory (one core per run, since several run side by side)
         res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True,
                              env=dict(os.environ, OMP_NUM_THREADS='1'))
         rho = wd / f"{tag}.rho"
         check_lapw5_run(res, rho, wd / f"{tag}.output5", tag)       # raises with the end of the lapw5 log
+
+        # 5. the result file: a header line (npx, npy, the two edge lengths), then the values
         with open(rho) as f:
             head = f.readline().split()
             vals = np.array(f.read().split(), dtype=np.float64)
         if int(head[0]) != npx or int(head[1]) != npy or vals.size != npx * npy:
             raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
+
+        # 6. remove the files of this plane
         if not self.keep:
             for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
                 (wd / f"{tag}.{ext}").unlink(missing_ok=True)
-        return vals.reshape((npx, npy))            # prtrh.f: x outer, y inner
+        return vals.reshape((npx, npy))            # lapw5 (prtrh.f) writes x in the outer loop, y in the inner
 
     def close(self):
+        """Remove the temporary working directory, unless keep is set.  A directory that was passed
+        as workdir is never removed."""
         if self._tmp and not self.keep:
             shutil.rmtree(self._tmp, ignore_errors=True)
 
 
 def _int_vector(frac3, max_den=10**6):
-    """(IX, IY, IZ, IDV) with IX/IDV = frac3[0] etc. (exact when possible)."""
-    fr = [x if isinstance(x, Fraction) else Fraction(x).limit_denominator(max_den) for x in frac3]
-    den = math.lcm(*(f.denominator for f in fr))
-    if den > 10**8:                                    # keep integers well inside int32
+    """(IX, IY, IZ, IDV) with IX/IDV = frac3[0] etc. (exact when possible).  lapw5 reads a point as
+    three integers over a common denominator: (0.5, 0, 0) -> (1, 0, 0, 2), (1.5, 2, 0) -> (3, 4, 0, 2)."""
+    # every coordinate as a fraction; a float becomes the nearest fraction with a denominator <= max_den
+    fracs = [x if isinstance(x, Fraction) else Fraction(x).limit_denominator(max_den) for x in frac3]
+    den = math.lcm(*(f.denominator for f in fracs))    # the common denominator
+    if den > 10**8:                                    # too large: round to max_den, the integers must fit int32
         den = max_den
-        fr = [Fraction(round(float(f) * den), den) for f in fr]
-    nums = [int(f * den) for f in fr]
-    if max(abs(n) for n in nums + [den]) >= 2**31:
+        fracs = [Fraction(round(float(f) * den), den) for f in fracs]
+    numerators = [int(f * den) for f in fracs]
+    if max(abs(n) for n in numerators + [den]) >= 2**31:
         raise ValueError(f"cannot represent {frac3} as lapw5 integers")
-    return (*nums, den)
+    return (*numerators, den)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -204,11 +256,17 @@ def _int_vector(frac3, max_den=10**6):
 # cover the other crystals (orthogonal cells, see conventional_vectors_ang).
 # ═══════════════════════════════════════════════════════════════
 
-# centring translations of the WIEN2k lattice types (fractions of the conventional cell)
-CENTRING = {'H': [(0, 0, 0)],                                               # hexagonal (graphene)
-            'P': [(0, 0, 0)], 'B': [(0, 0, 0), (0.5, 0.5, 0.5)],            # primitive, body-centred
-            'F': [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],  # face-centred; next line: base-centred
-            'CXY': [(0, 0, 0), (0.5, 0.5, 0)], 'CXZ': [(0, 0, 0), (0.5, 0, 0.5)], 'CYZ': [(0, 0, 0), (0, 0.5, 0.5)]}
+# Centring translations of the WIEN2k lattice types, in fractions of the conventional cell.  Every atom
+# listed in case.struct exists once at each of them.
+CENTRING = {
+    'H':   [(0, 0, 0)],                                                # hexagonal (graphene)
+    'P':   [(0, 0, 0)],                                                # primitive
+    'B':   [(0, 0, 0), (0.5, 0.5, 0.5)],                               # body-centred
+    'F':   [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],   # face-centred
+    'CXY': [(0, 0, 0), (0.5, 0.5, 0)],                                 # base-centred, xy face
+    'CXZ': [(0, 0, 0), (0.5, 0, 0.5)],                                 # base-centred, xz face
+    'CYZ': [(0, 0, 0), (0, 0.5, 0.5)],                                 # base-centred, yz face
+}
 
 
 def conventional_vectors_ang(struct):
@@ -216,13 +274,16 @@ def conventional_vectors_ang(struct):
     orientation.  Orthogonal cells and the hexagonal H lattice only."""
     a, b, c = (x * BOHR for x in struct['abc_bohr'])
     if struct['lattice'].upper().startswith('H'):                        # graphene
-        return np.array([[a * math.sqrt(3) / 2, -a / 2, 0], [0, a, 0], [0, 0, c]])
+        return np.array([[a * math.sqrt(3) / 2, -a / 2, 0],             # a1
+                         [0, a, 0],                                     # a2, at 120° to a1
+                         [0, 0, c]])                                    # c
     if all(abs(x - 90.0) < 1e-6 for x in struct['angles']):              # the other crystals: orthogonal cells
         return np.diag([a, b, c])
     raise NotImplementedError("non-orthogonal cells other than H are not supported")
 
 
 def centring_translations(lattice):
+    """The centring translations of a lattice type as it is named in case.struct ('H', 'CXY', ...)."""
     for key, shifts in CENTRING.items():
         if lattice.upper().startswith(key):
             return list(shifts)
@@ -240,26 +301,36 @@ def read_struct(path):
     the conventional cell as listed in case.struct (centring copies are NOT
     included; see centring_translations)."""
     lines = Path(path).read_text().splitlines()
+
+    # line 2 starts with the lattice type; line 4 holds a, b, c, alpha, beta, gamma, 10 characters each
+    lattice = lines[1][:4].strip()
     abc = [float(lines[3][i:i + 10]) for i in (0, 10, 20)]
     ang = []
     for i in (30, 40, 50):
         s = lines[3][i:i + 10].strip()
         ang.append(float(s) if s and float(s) != 0.0 else 90.0)      # blank or 0 means 90°
+
+    # then one block per inequivalent atom, here the one of graphene (MULT = 2 equivalent positions):
+    #     ATOM  -1: X=0.33333333 Y=0.66666667 Z=0.00000000                   line i: the first position
+    #               MULT= 2          ISPLIT= 4                               line i + 1
+    #           -1: X=0.66666667 Y=0.33333333 Z=0.00000000                   MULT - 1 further positions
+    #     C 1        NPT=  781  R0=0.00010000 RMT=    1.3300   Z:  6.0       element line: name and Z
     atoms, i = [], 4
     while i < len(lines):
-        if not lines[i].startswith('ATOM'):
+        if lines[i].startswith('ATOM'):
+            mult = int(lines[i + 1].split('MULT=')[1].split()[0])
+            position_lines = [i] + list(range(i + 2, i + 1 + mult))     # line i, then the lines after MULT
+            el = lines[i + 1 + mult]                                    # the element line
+            atoms.append({'name': el[:10].strip(), 'Z': float(el.split('Z:')[1].split()[0]),
+                          'positions': [_xyz(lines[j]) for j in position_lines]})
+            i += 2 + mult                            # continue after the element line
+        else:
             i += 1
-            continue
-        mult = int(lines[i + 1].split('MULT=')[1].split()[0])        # line i + 1: MULT= and ISPLIT=
-        rows = [i, *range(i + 2, i + 1 + mult)]                      # first position, then the equivalent ones
-        el = lines[i + 1 + mult]                                     # element line, after the positions
-        atoms.append({'name': el[:10].strip(), 'Z': float(el.split('Z:')[1].split()[0]),
-                      'positions': [_xyz(lines[j]) for j in rows]})
-        i += 2 + mult
-    return {'lattice': lines[1][:4].strip(), 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
+    return {'lattice': lattice, 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
 
 
 def _xyz(line):
+    """The three numbers of a position line '... X=0.33333333 Y=0.66666667 Z=0.00000000'."""
     s = line.split('X=')[1]
     return (float(s[:10]), float(s.split('Y=')[1][:10]), float(s.split('Z=')[1][:10]))
 
@@ -268,44 +339,49 @@ def atoms_in_cell(struct, origin, edges, tol=1e-6):
     """(Z, fractional position in the conventional cell) of all atoms inside the
     cell origin + u e0 + v e1 + w e2, 0 <= u, v, w < 1."""
     origin = np.asarray(origin, float)
-    E = np.array(edges, float)
-    Einv = np.linalg.inv(E)
-    corners = np.array([origin + E.T @ np.array(c) for c in np.ndindex(2, 2, 2)])
-    lo = np.floor(corners.min(axis=0)).astype(int) - 1
-    hi = np.ceil(corners.max(axis=0)).astype(int) + 1
+    grid_edges = np.array(edges, float)             # rows: the three edges of the grid cell
+    to_grid = np.linalg.inv(grid_edges)             # conventional fractions -> fractions of the grid edges
+
+    # Method: shift every atom by all whole lattice vectors of a box that surely covers the grid cell
+    # (the box around its eight corners, one cell wider) and keep the copies that fall inside.
+    corners = np.array([origin + grid_edges.T @ np.array(c) for c in np.ndindex(2, 2, 2)])
+    first = np.floor(corners.min(axis=0)).astype(int) - 1
+    last = np.ceil(corners.max(axis=0)).astype(int) + 1
     out = []
     for at in struct['atoms']:
         for pos in at['positions']:
             for t in centring_translations(struct['lattice']):
-                f0 = (np.array(pos) + np.array(t)) % 1.0
-                for n in np.ndindex(*(hi - lo + 1)):
-                    f = f0 + lo + np.array(n)
-                    g = (f - origin) @ Einv
-                    if np.all(g > -tol) and np.all(g < 1 - tol):
-                        out.append((int(round(at['Z'])), f))
+                home = (np.array(pos) + np.array(t)) % 1.0                  # the atom in the cell at the origin
+                for n in np.ndindex(*(last - first + 1)):
+                    frac = home + first + np.array(n)                       # its copy in another cell
+                    in_cell = (frac - origin) @ to_grid                     # in fractions of the grid edges
+                    if np.all(in_cell > -tol) and np.all(in_cell < 1 - tol):
+                        out.append((int(round(at['Z'])), frac))
     return out
 
 
 def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (0, 1, 0), (0, 0, 1))):
-    """origin, edges: grid origin and edge vectors in fractional coordinates of
-    the conventional cell (default: the conventional cell itself)."""
+    """Write data [nx, ny, nz] as an XSF file.  origin, edges: grid origin and edge vectors in fractional
+    coordinates of the conventional cell (default: the conventional cell itself)."""
     conv = conventional_vectors_ang(struct)
     cell = np.array(edges, float) @ conv               # Cartesian grid vectors [Å] (rows)
     o_cart = np.asarray(origin, float) @ conv
     atoms = [(z, f @ conv) for z, f in atoms_in_cell(struct, origin, edges)]
     nx, ny, nz = data.shape
-    vec = "%16.8E%16.8E%16.8E\n"
+    vec = "%16.8E%16.8E%16.8E\n"                       # one vector per line
     cell_txt = ''.join(vec % tuple(v) for v in cell)
     with open(path, 'w') as f:
         f.write(f"# XSF-File prepared by lapw5grid.py (values from lapw5)\n# {comment}\n")
+        # the structure: the grid cell as the crystal cell, then the atoms inside it [Å]
         f.write(f"CRYSTAL\nPRIMVEC\n{cell_txt}CONVVEC\n{cell_txt}")
         f.write("PRIMCOORD\n%5d    1\n" % len(atoms))
         for z, r in atoms:
-            f.write("%3d" % z + vec % tuple(r))
+            f.write("%3d" % z + vec % tuple(r))             # atomic number, position
+        # the grid: points per axis, origin, the three vectors that span it, then the values
         f.write("BEGIN_BLOCK_DATAGRID3D\n lapw5grid\nDATAGRID_3D_GRID\n")
         f.write(f"{nx} {ny} {nz}\n" + vec % tuple(o_cart) + cell_txt)
         flat = data.reshape(-1, order='F')             # x fastest, as 3ddens
-        for s in range(0, flat.size, 5):
+        for s in range(0, flat.size, 5):               # five values per line
             f.write(''.join("%16.8E" % v for v in flat[s:s + 5]) + "\n")
         f.write("END_DATAGRID_3D\nEND_BLOCK_DATAGRID3D\n")
 
