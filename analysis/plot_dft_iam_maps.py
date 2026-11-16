@@ -42,11 +42,17 @@ def read_cell(casedir):
     """Cell size (zigzag x, armchair y) [Å] and the atoms as (armchair, zigzag)
     fractions from the ixchel cfg (cfg positions are [x, y])."""
     text = (Path(casedir) / 'Graphene_ixchel_001.cfg').read_text()
-    m = re.search(r'size_uc\s*=\s*\{\s*x\s*=\s*([0-9.]+);\s*y\s*=\s*([0-9.]+);', text)
+    # the two cfg entries that are read (x = zigzag, y = armchair):
+    #     size_uc = { x = 2.4609990418; y = 4.2625753778; z = 14.9999940395; };
+    #     positions = (
+    #         [ 0.5000000050, 0.1666666650 ],
+    #         [ -0.0000000050, 0.3333333350 ], ...
+    #     );
+    size = re.search(r'size_uc\s*=\s*\{\s*x\s*=\s*([0-9.]+);\s*y\s*=\s*([0-9.]+);', text)
     block = re.search(r'positions\s*=\s*\((.*?)\);', text, re.S).group(1)
-    atoms = [(float(y) % 1.0, float(x) % 1.0)
+    atoms = [(float(y) % 1.0, float(x) % 1.0)                   # (armchair, zigzag), inside the cell
              for x, y in re.findall(r'\[\s*([-0-9.Ee+]+)\s*,\s*([-0-9.Ee+]+)\s*\]', block)]
-    return float(m.group(1)), float(m.group(2)), atoms
+    return float(size.group(1)), float(size.group(2)), atoms
 
 
 def load(casedir, kind):
@@ -58,25 +64,27 @@ def load(casedir, kind):
 def ring_mask(shape, radius, atoms, a_zz, b_ac):
     """Pixels within `radius` Å of any atom of one periodic cell."""
     n_ac, n_zz = shape
-    u = (np.arange(n_ac) / n_ac)[:, None]
-    v = (np.arange(n_zz) / n_zz)[None, :]
-    m = np.zeros(shape, bool)
+    u = (np.arange(n_ac) / n_ac)[:, None]           # position of every pixel row (armchair), as a fraction of the cell
+    v = (np.arange(n_zz) / n_zz)[None, :]           # the same for every pixel column (zigzag)
+    mask = np.zeros(shape, bool)
     for fu, fv in atoms:
-        du = (u - fu + 0.5) % 1.0 - 0.5
-        dv = (v - fv + 0.5) % 1.0 - 0.5
-        m |= np.hypot(du * b_ac, dv * a_zz) <= radius
-    return m
+        du = (u - fu + 0.5) % 1.0 - 0.5             # distance to the atom, to its nearest periodic image,
+        dv = (v - fv + 0.5) % 1.0 - 0.5             # in fractions of the cell: always within -1/2 ... 1/2
+        mask |= np.hypot(du * b_ac, dv * a_zz) <= radius            # the distance in Å
+    return mask
 
 
 def main():
     casedir, out = sys.argv[1], sys.argv[2]
+
+    # ── the data: V_z of one cell for IAM and DFT, their difference, the changes integrated over areas ──
     a_zz, b_ac, atoms = read_cell(casedir)
     iam, dft = load(casedir, 'IAM'), load(casedir, 'DFT')
     n_ac = iam.shape[0]
     diff = dft - iam
     rel = diff / iam * 100.0
 
-    bond = b_ac / 3
+    bond = b_ac / 3                                 # C-C bond length: the armchair period holds three of them
     ring = ring_mask(iam.shape, bond / 4, atoms, a_zz, b_ac)      # red ring: diameter = bond / 2
     stats = {
         'cell': (dft.sum() / iam.sum() - 1) * 100,
@@ -84,8 +92,9 @@ def main():
         'rest': (dft[~ring].sum() / iam[~ring].sum() - 1) * 100,
     }
 
-    tile = lambda a: np.tile(a, (NT_AC, NT_ZZ))    # noqa: E731
-    ext = [0, NT_AC * b_ac, 0, NT_ZZ * a_zz]
+    # ── the figure: maps a-d in the upper row, line scan e, f and the numbers g in the lower row ──
+    tile = lambda a: np.tile(a, (NT_AC, NT_ZZ))    # noqa: E731   (the cell repeated for display)
+    ext = [0, NT_AC * b_ac, 0, NT_ZZ * a_zz]        # size of the displayed area [Å]: armchair, zigzag
 
     plt.rcParams.update({'font.size': 9, 'axes.edgecolor': INK2, 'axes.labelcolor': INK,
                          'xtick.color': INK2, 'ytick.color': INK2, 'text.color': INK})
@@ -102,6 +111,7 @@ def main():
         ax.set(xlabel='armchair x [Å]', ylabel='zigzag y [Å]')
         return ax
 
+    # panels a and b share one logarithmic grey scale; c and d have their own colour maps
     lognorm = LogNorm(vmin=min(iam.min(), dft.min()), vmax=max(iam.max(), dft.max()))
     image(0, iam, 'a  IAM (dstart), log scale', 'V$_z$ [V·Å]', cmap='gray', norm=lognorm)
     image(1, dft, 'b  DFT (SCF), log scale', 'V$_z$ [V·Å]', cmap='gray', norm=lognorm)
@@ -117,29 +127,34 @@ def main():
                 ax.add_patch(plt.Circle(((fu + i) * b_ac, (fv + j) * a_zz), bond / 4,
                                         fill=False, lw=0.8, ec=RED))
 
-    # line scan along armchair through the atom row at zigzag y = 0 (TIFF column 0)
+    # panel e: line scan along armchair through the atom row at zigzag y = 0 (TIFF column 0)
     x = np.arange(NT_AC * n_ac) * b_ac / n_ac
-    li, ld, lr = np.tile(iam[:, 0], NT_AC), np.tile(dft[:, 0], NT_AC), np.tile(rel[:, 0], NT_AC)
+    line_iam = np.tile(iam[:, 0], NT_AC)
+    line_dft = np.tile(dft[:, 0], NT_AC)
+    line_rel = np.tile(rel[:, 0], NT_AC)
     ax = fig.add_subplot(gs[1, 0:2])
-    ax.semilogy(x, li, color=BLUE, lw=1.5, label='IAM')
-    ax.semilogy(x, ld, color=ORANGE, lw=1.5, label='DFT')
+    ax.semilogy(x, line_iam, color=BLUE, lw=1.5, label='IAM')
+    ax.semilogy(x, line_dft, color=ORANGE, lw=1.5, label='DFT')
     ax.grid(True, which='major', color=GRID, lw=0.6)
     ax.set(xlim=(x[0], x[-1]), ylim=(4.0, None), ylabel='V$_z$ [V·Å]',
            xlabel='armchair x [Å] (line through the atoms, zigzag y = 0)')
     ax.set_title('e  line scan', loc='left', fontsize=9.5)
     # legend and direct labels in the hexagon centre (line minimum) nearest to the middle
-    mins = np.where((li <= np.roll(li, 1)) & (li <= np.roll(li, -1)) & (li < 1.5 * li.min()))[0]
-    k = int(mins[np.argmin(np.abs(x[mins] - x[-1] / 2))])
-    ax.legend(loc='upper center', bbox_to_anchor=(x[k] / x[-1], 0.99), frameon=False)
-    ax.annotate('IAM', (x[k], li[k]), xytext=(4, 6), textcoords='offset points', color=INK2)
-    ax.annotate('DFT', (x[k], ld[k]), xytext=(4, -12), textcoords='offset points', color=INK2)
+    minima = np.where((line_iam <= np.roll(line_iam, 1)) & (line_iam <= np.roll(line_iam, -1))
+                      & (line_iam < 1.5 * line_iam.min()))[0]
+    centre = int(minima[np.argmin(np.abs(x[minima] - x[-1] / 2))])
+    ax.legend(loc='upper center', bbox_to_anchor=(x[centre] / x[-1], 0.99), frameon=False)
+    ax.annotate('IAM', (x[centre], line_iam[centre]), xytext=(4, 6), textcoords='offset points', color=INK2)
+    ax.annotate('DFT', (x[centre], line_dft[centre]), xytext=(4, -12), textcoords='offset points', color=INK2)
 
+    # panel f: the relative change on the same line
     ax = fig.add_subplot(gs[1, 2])
-    ax.plot(x, lr, color=INK2, lw=1.5)
+    ax.plot(x, line_rel, color=INK2, lw=1.5)
     ax.grid(True, color=GRID, lw=0.6)
     ax.set(xlim=(x[0], x[-1]), xlabel='armchair x [Å]', ylabel='(DFT − IAM) / IAM [%]')
     ax.set_title('f  relative change on the line', loc='left', fontsize=9.5)
 
+    # panel g: no plot, the three integrated changes as text
     ax = fig.add_subplot(gs[1, 3])
     ax.axis('off')
     ax.set_title('g  integrated change (Fig. 6 e)', loc='left', fontsize=9.5)
