@@ -130,19 +130,27 @@ def read_xsf(path, order='auto'): #step 1 in order of execution
     with open(path) as f:
         lines = f.readlines()
 
-    for i, ln in enumerate(lines):                  # i: the line that opens the data grid
+    # The data grid block of the file, here the 73 x 127 x 451 graphene grid written by lapw5grid.py:
+    #     DATAGRID_3D_GRID                                         line i
+    #     73 127 451                                               line i + 1: points along the three axes
+    #       0.00000000E+00  0.00000000E+00  0.00000000E+00         line i + 2: origin of the grid (not needed)
+    #       2.13128852E+00 -1.23050000E+00  0.00000000E+00         line i + 3: first vector that spans the grid [Å]
+    #       2.13128852E+00  3.69150001E+00  0.00000000E+00         line i + 4: second vector
+    #       0.00000000E+00  0.00000000E+00  1.50000001E+01         line i + 5: third vector
+    #      -1.34201729E-01 -1.35038385E-01 -1.37563815E-01 ...     from line i + 6: the values [Ry]
+    #     END_DATAGRID_3D
+    for i, ln in enumerate(lines):                  # find line i, the one that opens the data grid
         if 'DATAGRID_3D' in ln and 'BEGIN_BLOCK' not in ln and 'END' not in ln:
             break
     else:
         sys.exit("Error: no DATAGRID_3D block found in XSF.")
 
     nx, ny, nz = map(int, lines[i + 1].split())
-    # lines[i + 2] is the grid origin (ignored); then the three vectors that span the grid
     va = np.array(list(map(float, lines[i + 3].split())))
     vb = np.array(list(map(float, lines[i + 4].split())))
     vc = np.array(list(map(float, lines[i + 5].split())))
 
-    vals = []
+    vals = []                                       # all numbers up to the end of the block, in file order
     for ln in lines[i + 6:]:
         if len(vals) >= nx * ny * nz or 'END_DATAGRID' in ln:
             break
@@ -150,8 +158,8 @@ def read_xsf(path, order='auto'): #step 1 in order of execution
     if len(vals) < nx * ny * nz:
         sys.exit(f"Error: too few data points ({len(vals)} < {nx*ny*nz}).")
 
-    data, _ = _reshape_xsf(vals, nx, ny, nz, order)
-    return data, (np.linalg.norm(va), np.linalg.norm(vb), np.linalg.norm(vc)), (nx, ny, nz)
+    data, _ = _reshape_xsf(vals, nx, ny, nz, order)                 # the list of numbers as an array [nx, ny, nz]
+    return data, (np.linalg.norm(va), np.linalg.norm(vb), np.linalg.norm(vc)), (nx, ny, nz)   # lengths in Å
 
 
 def drop_periodic_duplicates(data):
@@ -200,35 +208,48 @@ def parse_cfg(cfg_path):
     """Read the layer geometry (size_uc, filename, stacking) from an ixchel cfg."""
     text = Path(cfg_path).read_text()
 
-    sm = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
-    if not sm:
+    # The parts of the cfg that are read, here rutile [001] with the two layers a and b (written by crystruct):
+    #     stack_seq = "1(ab)";
+    #     layers = {
+    #         a = {
+    #             size_uc = { x = 4.5939999819; y = 4.5939999819; z = 1.4790000021; };
+    #             filename = "atompota.tif";
+    #             atoms = ( ... );
+    #         };
+    #         b = { ... };
+    #     };
+    stack_match = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
+    if not stack_match:
         sys.exit("Error: stack_seq not found in cfg.")
-    lm = re.search(r'layers\s*=\s*\{', text)
-    if not lm:
+    layers_match = re.search(r'layers\s*=\s*\{', text)
+    if not layers_match:
         sys.exit("Error: layers block not found in cfg.")
-    layers_text = text[lm.end():_block_end(text, lm.end() - 1)]
+    layers_text = text[layers_match.end():_block_end(text, layers_match.end() - 1)]     # inside "layers = { ... }"
 
+    # one block "<letter> = { ... }" per layer
     layer_defs = {}                                 # label -> size and file name of that layer
     pos = 0
     while pos < len(layers_text):
-        lbm = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
-        if not lbm:
+        label_match = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
+        if not label_match:
             break
-        bstart = pos + lbm.end() - 1
-        bend = _block_end(layers_text, bstart)
-        block = layers_text[bstart + 1:bend]
-        su = re.search(
+        block_start = pos + label_match.end() - 1               # the '{' of this layer
+        block_end = _block_end(layers_text, block_start)        # and its '}'
+        block = layers_text[block_start + 1:block_end]
+        size_match = re.search(
             r'size_uc\s*=\s*\{[^}]*x\s*=\s*([0-9.E+\-]+)[^}]*'
             r'y\s*=\s*([0-9.E+\-]+)[^}]*z\s*=\s*([0-9.E+\-]+)', block)
-        fn_m = re.search(r'filename\s*=\s*\"([^\"]+)\"', block)
-        if su and fn_m:
-            layer_defs[lbm.group(1)] = {'ax': float(su.group(1)), 'by': float(su.group(2)),
-                                        'cz': float(su.group(3)), 'filename': fn_m.group(1)}
-        pos = bend + 1
+        file_match = re.search(r'filename\s*=\s*\"([^\"]+)\"', block)
+        if size_match and file_match:
+            layer_defs[label_match.group(1)] = {
+                'ax': float(size_match.group(1)), 'by': float(size_match.group(2)),
+                'cz': float(size_match.group(3)), 'filename': file_match.group(1)}
+        pos = block_end + 1
 
+    # the layers in stacking order; z0 is the depth at which a layer starts
     layers = []
     z0 = 0.0
-    for label in sm.group(1):                       # the stacking sequence, one letter per layer
+    for label in stack_match.group(1):              # the stacking sequence, one letter per layer
         if label not in layer_defs:
             sys.exit(f"Error: layer '{label}' not defined in layers block.")
         ld = layer_defs[label]
@@ -307,11 +328,12 @@ def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
     else:
         rank_filter, masked = maximum_filter, np.where(flagged, -np.inf, data)
 
-    todo = flagged.copy()
+    todo = flagged.copy()                   # flagged voxels that still wait for a value
     size = 3
     for _ in range(20):
+        # nb: for every voxel the best unflagged value in its neighbourhood (inf if there is none)
         nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
-        got = todo & np.isfinite(nb)
+        got = todo & np.isfinite(nb)        # waiting voxels that have found a value in this round
         data[got] = nb[got]
         todo &= ~got
         if not todo.any():
