@@ -50,6 +50,12 @@ The edges must be lattice translations, otherwise the last planes are not
 periodic images of the first (a warning is printed).  The XSF then lists the
 grid cell as the crystal cell.
 
+Layout of this file: the CORE comes first, in two parts.  Part 1 is the lapw5
+driver; it is the same for graphene and for every other crystal, because
+lapw5 reads case.struct itself.  Part 2 holds the lattice types.  After the
+core: the file formats (case.struct in, XSF out), the checks with their error
+messages, and the command line.
+
 Requires lapw5c on PATH ($WIENROOT) and numpy.
 """
 
@@ -69,10 +75,14 @@ import numpy as np
 
 BOHR = 0.529177210903   # Bohr -> Å
 
-# centring translations of the WIEN2k lattice types (fractions of the conventional cell)
-CENTRING = {'P': [(0, 0, 0)], 'H': [(0, 0, 0)], 'B': [(0, 0, 0), (0.5, 0.5, 0.5)],
-            'F': [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],
-            'CXY': [(0, 0, 0), (0.5, 0.5, 0)], 'CXZ': [(0, 0, 0), (0.5, 0, 0.5)], 'CYZ': [(0, 0, 0), (0, 0.5, 0.5)]}
+
+# ═══════════════════════════════════════════════════════════════
+# CORE, part 1 of 2: the lapw5 driver
+#
+# Turns a WIEN2k file into values on a 3D grid, plane by plane.  Nothing here
+# depends on the crystal: lapw5 reads case.struct itself, so graphene and
+# every other lattice type take exactly this path.
+# ═══════════════════════════════════════════════════════════════
 
 # file list of one lapw5 run (Fortran unit, file): 5 input, 6 log, 8 struct, 9 the clm file,
 # 11 the clm file to subtract, 21 the values on the plane
@@ -89,95 +99,13 @@ DEF = """\
 """
 
 
-# ── case.struct ────────────────────────────────────────────────
-
-def read_struct(path):
-    """Lattice type, lattice constants [bohr], angles [deg] and all atoms of
-    the conventional cell as listed in case.struct (centring copies are NOT
-    included; see centring_translations)."""
-    lines = Path(path).read_text().splitlines()
-    abc = [float(lines[3][i:i + 10]) for i in (0, 10, 20)]
-    ang = []
-    for i in (30, 40, 50):
-        s = lines[3][i:i + 10].strip()
-        ang.append(float(s) if s and float(s) != 0.0 else 90.0)      # blank or 0 means 90°
-    atoms, i = [], 4
-    while i < len(lines):
-        if not lines[i].startswith('ATOM'):
-            i += 1
-            continue
-        mult = int(lines[i + 1].split('MULT=')[1].split()[0])        # line i + 1: MULT= and ISPLIT=
-        rows = [i, *range(i + 2, i + 1 + mult)]                      # first position, then the equivalent ones
-        el = lines[i + 1 + mult]                                     # element line, after the positions
-        atoms.append({'name': el[:10].strip(), 'Z': float(el.split('Z:')[1].split()[0]),
-                      'positions': [_xyz(lines[j]) for j in rows]})
-        i += 2 + mult
-    return {'lattice': lines[1][:4].strip(), 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
-
-
-def _xyz(line):
-    s = line.split('X=')[1]
-    return (float(s[:10]), float(s.split('Y=')[1][:10]), float(s.split('Z=')[1][:10]))
-
-
-def centring_translations(lattice):
-    for key, shifts in CENTRING.items():
-        if lattice.upper().startswith(key):
-            return list(shifts)
-    raise NotImplementedError(f"lattice type '{lattice}' not supported")
-
-
-def conventional_vectors_ang(struct):
-    """Cartesian conventional lattice vectors [Å] (rows) in the WIEN2k/3ddens
-    orientation.  Orthogonal cells and the hexagonal H lattice only."""
-    a, b, c = (x * BOHR for x in struct['abc_bohr'])
-    if struct['lattice'].upper().startswith('H'):
-        return np.array([[a * math.sqrt(3) / 2, -a / 2, 0], [0, a, 0], [0, 0, c]])
-    if all(abs(x - 90.0) < 1e-6 for x in struct['angles']):
-        return np.diag([a, b, c])
-    raise NotImplementedError("non-orthogonal cells other than H are not supported")
-
-
-# ── lapw5 driver ───────────────────────────────────────────────
-
-def _int_vector(frac3, max_den=10**6):
-    """(IX, IY, IZ, IDV) with IX/IDV = frac3[0] etc. (exact when possible)."""
-    fr = [x if isinstance(x, Fraction) else Fraction(x).limit_denominator(max_den) for x in frac3]
-    den = math.lcm(*(f.denominator for f in fr))
-    if den > 10**8:                                    # keep integers well inside int32
-        den = max_den
-        fr = [Fraction(round(float(f) * den), den) for f in fr]
-    nums = [int(f * den) for f in fr]
-    if max(abs(n) for n in nums + [den]) >= 2**31:
-        raise ValueError(f"cannot represent {frac3} as lapw5 integers")
-    return (*nums, den)
-
-
-def check_clm_header(path):
-    """Refuse vcoul files written without the r^2 factor (NONORM patch of lapw0);
-    lapw5 assumes the standard normalisation."""
-    with open(path) as f:
-        f.readline()
-        second = f.readline()
-    if 'NORM OF' in second and '*r**2' not in second.replace(' ', ''):
-        sys.exit(f"Error: {path} was written without the r^2 normalisation (NONORM); "
-                 f"lapw5 cannot evaluate it. Re-run lapw0 without NONORM.")
-
-
 class Lapw5Runner:
     """Evaluate clm_a (optionally clm_a - clm_b) on planes with lapw5."""
 
     def __init__(self, struct_path, clm_a, clm_b=None, norm='val', nshell=(2, 2, 2),
                  workdir=None, nproc=None, keep=False):
         self.norm = norm.upper()
-        if self.norm not in ('VAL', 'TOT'):
-            raise ValueError("norm must be 'val' or 'tot'")
-        for p in [clm_a] + ([clm_b] if clm_b else []):
-            if not Path(p).is_file() or Path(p).stat().st_size == 0:
-                sys.exit(f"Error: {p} missing or empty (for case.vcoul: R2V must be set in case.in0)")
-            check_clm_header(p)
-        if shutil.which('lapw5c') is None:
-            sys.exit("Error: lapw5c not found on PATH (source the WIEN2k environment)")
+        check_inputs(self.norm, [clm_a] + ([clm_b] if clm_b else []))     # stops here if something is missing
         self.sub = clm_b is not None
         self.nshell = nshell            # minimum; raised per plane if needed
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
@@ -191,46 +119,6 @@ class Lapw5Runner:
                 (self.wd / name).symlink_to(Path(src).resolve())
         self._counter = 0
         self._grid_calls = 0
-
-    def close(self):
-        if self._tmp and not self.keep:
-            shutil.rmtree(self._tmp, ignore_errors=True)
-
-    def plane(self, origin, xend, yend, npx, npy, tag=None):
-        """Values on the npx x npy grid origin + i/(npx-1)(xend-origin) + j/(npy-1)(yend-origin)
-        (fractional coordinates of the conventional cell).  Returns [npx, npy]."""
-        if tag is None:
-            self._counter += 1
-            tag = f"p{self._counter:05d}"
-        wd = self.wd
-        # lapw5 looks for muffin-tin spheres only among the cell origins
-        # -NSHELL..+NSHELL, so every corner of the plane must lie well inside
-        o, x, y = (np.asarray(v, float) for v in (origin, xend, yend))
-        reach = np.abs([o, x, y, x + y - o]).max(axis=0)            # farthest corner along each cell axis
-        nshell = [max(int(s), math.ceil(r - 1e-9) + 1) for s, r in zip(self.nshell, reach)]
-        in5 = ["%d %d %d %d" % _int_vector(v) for v in (origin, xend, yend)]
-        in5 += ["%d %d %d" % tuple(nshell), "%d %d" % (npx, npy), "RHO SUB " if self.sub else "RHO     ",
-                f"ATU {self.norm} NODEBUG", "NONORTHO"]
-        (wd / f"{tag}.in5").write_text("\n".join(in5) + "\n")
-        (wd / f"{tag}.def").write_text(DEF.format(tag=tag, unit11='clm_b' if self.sub else f"{tag}.none"))
-        res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True,
-                             env=dict(os.environ, OMP_NUM_THREADS='1'))
-        rho = wd / f"{tag}.rho"
-        if (res.returncode != 0 or not re.search(r'STOP\s+LAPW5C?\s+END', res.stdout + res.stderr)
-                or not rho.exists()):
-            out5 = wd / f"{tag}.output5"
-            tail = out5.read_text(errors='replace')[-1500:] if out5.exists() else ''
-            raise RuntimeError(f"lapw5c failed for plane {tag}:\n{res.stdout[-800:]}{res.stderr[-800:]}\n"
-                               f"--- end of {tag}.output5 ---\n{tail}")
-        with open(rho) as f:
-            head = f.readline().split()
-            vals = np.array(f.read().split(), dtype=np.float64)
-        if int(head[0]) != npx or int(head[1]) != npy or vals.size != npx * npy:
-            raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
-        if not self.keep:
-            for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
-                (wd / f"{tag}.{ext}").unlink(missing_ok=True)
-        return vals.reshape((npx, npy))            # prtrh.f: x outer, y inner
 
     def grid3d(self, origin, edges, counts, progress=True):
         """Values at origin + i/(n0-1) e0 + j/(n1-1) e1 + k/(n2-1) e2 for all
@@ -259,14 +147,121 @@ class Lapw5Runner:
                     print(f"    lapw5 planes {len(planes)}/{nk}", flush=True)
         return np.stack(planes, axis=k)
 
+    def plane(self, origin, xend, yend, npx, npy, tag=None):
+        """Values on the npx x npy grid origin + i/(npx-1)(xend-origin) + j/(npy-1)(yend-origin)
+        (fractional coordinates of the conventional cell).  Returns [npx, npy]."""
+        if tag is None:
+            self._counter += 1
+            tag = f"p{self._counter:05d}"
+        wd = self.wd
+        # lapw5 looks for muffin-tin spheres only among the cell origins
+        # -NSHELL..+NSHELL, so every corner of the plane must lie well inside
+        o, x, y = (np.asarray(v, float) for v in (origin, xend, yend))
+        reach = np.abs([o, x, y, x + y - o]).max(axis=0)            # farthest corner along each cell axis
+        nshell = [max(int(s), math.ceil(r - 1e-9) + 1) for s, r in zip(self.nshell, reach)]
+        in5 = ["%d %d %d %d" % _int_vector(v) for v in (origin, xend, yend)]
+        in5 += ["%d %d %d" % tuple(nshell), "%d %d" % (npx, npy), "RHO SUB " if self.sub else "RHO     ",
+                f"ATU {self.norm} NODEBUG", "NONORTHO"]
+        (wd / f"{tag}.in5").write_text("\n".join(in5) + "\n")
+        (wd / f"{tag}.def").write_text(DEF.format(tag=tag, unit11='clm_b' if self.sub else f"{tag}.none"))
+        res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True,
+                             env=dict(os.environ, OMP_NUM_THREADS='1'))
+        rho = wd / f"{tag}.rho"
+        check_lapw5_run(res, rho, wd / f"{tag}.output5", tag)       # raises with the end of the lapw5 log
+        with open(rho) as f:
+            head = f.readline().split()
+            vals = np.array(f.read().split(), dtype=np.float64)
+        if int(head[0]) != npx or int(head[1]) != npy or vals.size != npx * npy:
+            raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
+        if not self.keep:
+            for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
+                (wd / f"{tag}.{ext}").unlink(missing_ok=True)
+        return vals.reshape((npx, npy))            # prtrh.f: x outer, y inner
 
-# ── XSF output (3ddens-compatible general grid) ────────────────
+    def close(self):
+        if self._tmp and not self.keep:
+            shutil.rmtree(self._tmp, ignore_errors=True)
 
-def is_lattice_translation(vec, lattice, tol=1e-6):
-    """True if vec (fractional, conventional cell) is a translation of the lattice."""
-    v = np.asarray(vec, float)
-    return any(np.all(np.abs((v - np.array(t)) - np.round(v - np.array(t))) < tol)
-               for t in centring_translations(lattice))
+
+def _int_vector(frac3, max_den=10**6):
+    """(IX, IY, IZ, IDV) with IX/IDV = frac3[0] etc. (exact when possible)."""
+    fr = [x if isinstance(x, Fraction) else Fraction(x).limit_denominator(max_den) for x in frac3]
+    den = math.lcm(*(f.denominator for f in fr))
+    if den > 10**8:                                    # keep integers well inside int32
+        den = max_den
+        fr = [Fraction(round(float(f) * den), den) for f in fr]
+    nums = [int(f * den) for f in fr]
+    if max(abs(n) for n in nums + [den]) >= 2**31:
+        raise ValueError(f"cannot represent {frac3} as lapw5 integers")
+    return (*nums, den)
+
+
+# ═══════════════════════════════════════════════════════════════
+# CORE, part 2 of 2: lattice types
+#
+# The geometry of the cell, needed to give the grid in Å and to find the
+# atoms in it.  H is the hexagonal lattice of graphene; the other entries
+# cover the other crystals (orthogonal cells, see conventional_vectors_ang).
+# ═══════════════════════════════════════════════════════════════
+
+# centring translations of the WIEN2k lattice types (fractions of the conventional cell)
+CENTRING = {'H': [(0, 0, 0)],                                               # hexagonal (graphene)
+            'P': [(0, 0, 0)], 'B': [(0, 0, 0), (0.5, 0.5, 0.5)],            # primitive, body-centred
+            'F': [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],  # face-centred; next line: base-centred
+            'CXY': [(0, 0, 0), (0.5, 0.5, 0)], 'CXZ': [(0, 0, 0), (0.5, 0, 0.5)], 'CYZ': [(0, 0, 0), (0, 0.5, 0.5)]}
+
+
+def conventional_vectors_ang(struct):
+    """Cartesian conventional lattice vectors [Å] (rows) in the WIEN2k/3ddens
+    orientation.  Orthogonal cells and the hexagonal H lattice only."""
+    a, b, c = (x * BOHR for x in struct['abc_bohr'])
+    if struct['lattice'].upper().startswith('H'):                        # graphene
+        return np.array([[a * math.sqrt(3) / 2, -a / 2, 0], [0, a, 0], [0, 0, c]])
+    if all(abs(x - 90.0) < 1e-6 for x in struct['angles']):              # the other crystals: orthogonal cells
+        return np.diag([a, b, c])
+    raise NotImplementedError("non-orthogonal cells other than H are not supported")
+
+
+def centring_translations(lattice):
+    for key, shifts in CENTRING.items():
+        if lattice.upper().startswith(key):
+            return list(shifts)
+    raise NotImplementedError(f"lattice type '{lattice}' not supported")
+
+
+# ═══════════════════════════════════════════════════════════════
+# END OF CORE.  Below: file formats, checks, command line
+# ═══════════════════════════════════════════════════════════════
+
+# ── file formats: case.struct in, XSF out (3ddens-compatible general grid) ──
+
+def read_struct(path):
+    """Lattice type, lattice constants [bohr], angles [deg] and all atoms of
+    the conventional cell as listed in case.struct (centring copies are NOT
+    included; see centring_translations)."""
+    lines = Path(path).read_text().splitlines()
+    abc = [float(lines[3][i:i + 10]) for i in (0, 10, 20)]
+    ang = []
+    for i in (30, 40, 50):
+        s = lines[3][i:i + 10].strip()
+        ang.append(float(s) if s and float(s) != 0.0 else 90.0)      # blank or 0 means 90°
+    atoms, i = [], 4
+    while i < len(lines):
+        if not lines[i].startswith('ATOM'):
+            i += 1
+            continue
+        mult = int(lines[i + 1].split('MULT=')[1].split()[0])        # line i + 1: MULT= and ISPLIT=
+        rows = [i, *range(i + 2, i + 1 + mult)]                      # first position, then the equivalent ones
+        el = lines[i + 1 + mult]                                     # element line, after the positions
+        atoms.append({'name': el[:10].strip(), 'Z': float(el.split('Z:')[1].split()[0]),
+                      'positions': [_xyz(lines[j]) for j in rows]})
+        i += 2 + mult
+    return {'lattice': lines[1][:4].strip(), 'abc_bohr': abc, 'angles': ang, 'atoms': atoms}
+
+
+def _xyz(line):
+    s = line.split('X=')[1]
+    return (float(s[:10]), float(s.split('Y=')[1][:10]), float(s.split('Z=')[1][:10]))
 
 
 def atoms_in_cell(struct, origin, edges, tol=1e-6):
@@ -314,6 +309,49 @@ def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (
             f.write(''.join("%16.8E" % v for v in flat[s:s + 5]) + "\n")
         f.write("END_DATAGRID_3D\nEND_BLOCK_DATAGRID3D\n")
 
+
+# ── checks and error messages ──────────────────────────────────
+
+def check_inputs(norm, clm_files):
+    """Before the first lapw5 run: stop with a clear message if the request cannot work."""
+    if norm not in ('VAL', 'TOT'):
+        raise ValueError("norm must be 'val' or 'tot'")
+    for p in clm_files:
+        if not Path(p).is_file() or Path(p).stat().st_size == 0:
+            sys.exit(f"Error: {p} missing or empty (for case.vcoul: R2V must be set in case.in0)")
+        check_clm_header(p)
+    if shutil.which('lapw5c') is None:
+        sys.exit("Error: lapw5c not found on PATH (source the WIEN2k environment)")
+
+
+def check_clm_header(path):
+    """Refuse vcoul files written without the r^2 factor (NONORM patch of lapw0);
+    lapw5 assumes the standard normalisation."""
+    with open(path) as f:
+        f.readline()
+        second = f.readline()
+    if 'NORM OF' in second and '*r**2' not in second.replace(' ', ''):
+        sys.exit(f"Error: {path} was written without the r^2 normalisation (NONORM); "
+                 f"lapw5 cannot evaluate it. Re-run lapw0 without NONORM.")
+
+
+def check_lapw5_run(res, rho, out5, tag):
+    """After the lapw5 run of one plane: raise with the end of its output if it failed."""
+    if (res.returncode != 0 or not re.search(r'STOP\s+LAPW5C?\s+END', res.stdout + res.stderr)
+            or not rho.exists()):
+        tail = out5.read_text(errors='replace')[-1500:] if out5.exists() else ''
+        raise RuntimeError(f"lapw5c failed for plane {tag}:\n{res.stdout[-800:]}{res.stderr[-800:]}\n"
+                           f"--- end of {tag}.output5 ---\n{tail}")
+
+
+def is_lattice_translation(vec, lattice, tol=1e-6):
+    """True if vec (fractional, conventional cell) is a translation of the lattice."""
+    v = np.asarray(vec, float)
+    return any(np.all(np.abs((v - np.array(t)) - np.round(v - np.array(t))) < tol)
+               for t in centring_translations(lattice))
+
+
+# ── command line ───────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description='Evaluate a WIEN2k clm-type file on a 3D grid with lapw5 and write XSF')
