@@ -51,21 +51,24 @@ struct_path = d / 'Graphene.struct'
 st = read_struct(struct_path)
 c_A = st['abc_bohr'][2] * BOHR
 
-# density at the two bond centres, z = 0 (points: p1, p2; 2nd row unused)
+# density at the two bond centres, z = 0 (points: p1, p2; 2nd row unused).
+# lapw5 only evaluates planes, so the two points are the ends of the x edge of a 2 x 2 plane;
+# its y edge just has to point somewhere else (here a quarter of c upwards).
 run = Lapw5Runner(struct_path, d / args.clmsum, norm='tot', nproc=1)
 try:
     rho = run.plane((x1, y1, 0), (x2, y2, 0), (x1, y1, 0.25), 2, 2)[:, 0]
 finally:
     run.close()
 
-# potential columns through both centres: x-axis of the plane = z of the cell
+# potential columns through both centres: x-axis of the plane = z of the cell.
+# The x edge runs along c through p1 with nz points, the y edge leads over to the column through p2.
 run = Lapw5Runner(struct_path, d / args.vcoul, norm='val', nproc=1)
 try:
     col = run.plane((x1, y1, -0.5), (x1, y1, 0.5), (x2, y2, -0.5), args.nz, 2)   # [nz, 2]
 finally:
     run.close()
 col = col[:-1]                                   # drop the duplicated z end point
-dz = c_A / (args.nz - 1)
+dz = c_A / (args.nz - 1)                         # spacing of the z points [Å]
 vac = col.max()                                  # vacuum level (largest V_C) [Ry]
 Vz = ((vac - col) * RY_TO_V).sum(axis=0) * dz    # [V*Å]
 

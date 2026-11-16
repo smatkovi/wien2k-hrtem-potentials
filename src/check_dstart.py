@@ -65,13 +65,23 @@ def main():
     ok = True
 
     def report(passed, msg):
+        """Print one check as an 'ok' or a 'FAIL' line; a single FAIL makes the whole result FAIL."""
         nonlocal ok
         ok &= passed
         print(("  ok    " if passed else "  FAIL  ") + msg)
 
+    # The three kinds of lines of case.outputd that are looked at (graphene, a good run):
+    #      DENSITY SMOOTHENED USING MODE:           0
+    #     :NEC01: NUCLEAR AND ELECTRONIC CHARGE     12.00000    12.00035
+    #     Charge decomposition:     ZZ           MT      tail   MT+tail            (one block per inequivalent atom)
+    #                             6.00000   3.61744   2.38256   6.00000
     print(f"{outputd} vs {struct}")
+
+    # check 1: the standard code path was taken
     report('DENSITY SMOOTHENED' in text,
            "standard dstart path (old_dstart: 'DENSITY SMOOTHENED' printed)")
+
+    # check 2: the charge was renormalised, and the nuclear charge is the one of the struct file
     nec = re.search(r':NEC01:\s*NUCLEAR AND ELECTRONIC CHARGE\s+(\S+)\s+(\S+)', text)
     z_total = sum(z * m for _, z, m in atoms)
     if nec:
@@ -82,6 +92,7 @@ def main():
     else:
         report(False, "':NEC01' missing: the charge was not renormalised")
 
+    # check 3: the first number of every 'Charge decomposition' block (ZZ) is the Z of that atom
     zz = [float(m.group(1)) for m in
           re.finditer(r'Charge decomposition:[^\n]*\n\s*([-+0-9.Ee]+)', text)]
     if len(zz) != len(atoms):

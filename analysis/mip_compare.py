@@ -34,18 +34,22 @@ d = Path(sys.argv[1] if len(sys.argv) > 1 else '.')
 
 res = {}
 for k in ('DFT', 'IAM'):
+    # (1) the projected potential that vcoul2tiff_ulm.py wrote
     # ixchel TIFF: page 0 RGB preview, page 1 float32 data [1/Å], page 2 metadata
     tif = tifffile.imread(d / f'ulm_{k}_001' / 'atompota.tif', key=1).astype(np.float64)
+    # (2) the 3D grid it was made from, once more with and once without the cutoff
     data, (_, _, cz), _ = ulm.read_xsf(d / f'Graphene_vcoul_{k}_ongrid.xsf')
     data = ulm.drop_periodic_duplicates(data)                    # periodic grid
     nz = data.shape[2]
     dz = cz / nz
     cut, nrep = ulm.apply_nn_cutoff(data, CUTOFF_RY, 6, 'highest')
+    # mean inner potential = mean of V_s over the cell, with V_s = largest V_C (the vacuum level) - V_C
     mip_raw = ((data.max() - data) * RY_TO_V).mean()             # [V], no cutoff
     mip_cut = ((cut.max() - cut) * RY_TO_V).mean()               # [V], with cutoff
+    # (3) is the vacuum flat?  V_C averaged over the planes 1 Å below, at and 1 Å above mid-vacuum
     plane_mean = data.mean(axis=(0, 1)) * RY_TO_V                # [V] vs z
     izs = [nz // 2 - int(round(1.0 / dz)), nz // 2, nz // 2 + int(round(1.0 / dz))]
-    res[k] = dict(tif=tif.mean() * H2 / cz, raw=mip_raw, cut=mip_cut)
+    res[k] = dict(tif=tif.mean() * H2 / cz, raw=mip_raw, cut=mip_cut)   # TIFF: mean V_z / thickness
     print(f"{k}: TIFF mean V_z = {tif.mean():.5f} 1/Å = {tif.mean() * H2:.3f} V*Å -> MIP {res[k]['tif']:.4f} V;"
           f"  3D grid: MIP {mip_cut:.4f} V with cutoff ({nrep} voxels), {mip_raw:.4f} V without")
     print(f"     vacuum: plane-averaged V_C at z = " +
