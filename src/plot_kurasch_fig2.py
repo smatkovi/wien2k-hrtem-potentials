@@ -210,7 +210,7 @@ def lapw5_linescan(struct_path, vcoul_path, ppa=250.0, axis=0):
     n = int(round(length * ppa)) + 1
     end = pos.copy(); end[axis] += 0.5
     other = pos.copy(); other[(axis + 1) % 3] += 0.25   # second, unused row of the lapw5 plane
-    run = Lapw5Runner(struct_path, vcoul_path, norm='val', nproc=1)
+    run = Lapw5Runner(struct_path, vcoul_path, nproc=1)
     try:
         plane = run.plane(tuple(pos), tuple(end), tuple(other), n, 2)
     finally:
