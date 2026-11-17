@@ -33,16 +33,15 @@ In the order of use:
   structure file to the DFT-vs-IAM figure (steps 0–7 below).
 * `src/check_dstart.py` — checks a `x dstart` run: standard code path, charge
   renormalisation, `case.rsp` consistent with `case.struct`.
-* `src/lapw5grid.py` — evaluates `case.vcoul` (or `case.clmsum`, …) with lapw5c
-  on a 3D grid and writes an XSF file. `--edges` and `--origin` choose the grid
+* `src/lapw5grid.py` — evaluates `case.vcoul` with lapw5c on a 3D grid and
+  writes the values as an XSF data grid. `--edges` and `--origin` choose the grid
   box, e.g. the rectangular cell a₁, a₁ + 2a₂ of a hexagonal lattice:
   `--edges 1 0 0  1 2 0  0 0 1`.
 * `src/vcoul2tiff_ulm.py` — steps 2 to 5 of the method: cutoff, shift,
   projection per layer, conversion to 1/Å. Writes one TIFF per layer, each
   holding one unit cell.
 * `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
-  side, so that it covers the ixchel `dim` grid, and adds ixchel's cfg
-  checksum. Required before `ixchel main`.
+  side, so that it covers the ixchel `dim` grid. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
   page 1 float32 data, page 2 checksums). Imported by the scripts that read or
   write layer files.
@@ -224,6 +223,10 @@ done
 
 Do **not** run `ixchel atompot` in these directories: it would overwrite the
 WIEN2k layer files with ixchel's own atomic potentials.
+
+`ixchel main` prints the warning that the layer file "was created with a
+different crystal structure config file": the layer files carry no checksum
+of the cfg. The calculation is not affected.
 
 `writeTrans = 1` makes `ixchel main` write its transmission function, which
 shows what ixchel made of the layer file:

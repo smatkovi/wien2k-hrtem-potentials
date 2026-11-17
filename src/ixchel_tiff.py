@@ -11,7 +11,8 @@ function trans_<label>.tif, wave function) as a TIFF with three pages:
              imaginary parts, see check_transmission.py)
     page 2   two uint32 checksums [crystal-structure cfg, simulation cfg];
              ixchel warns about a foreign crystal structure if the first one
-             is not the POSIX cksum of its cfg (tiff2ixchel.py sets it)
+             is not the POSIX cksum of its cfg.  The files written here leave
+             both at zero, so `ixchel main` prints that warning for them.
 
 This module is imported by the scripts that read or write such files
 (vcoul2tiff_ulm.py, tiff2ixchel.py, check_transmission.py):
@@ -32,9 +33,9 @@ def read_ixchel_tiff(path):
     return tifffile.imread(str(path), key=1).astype(np.float64)
 
 
-def write_ixchel_tiff(filename, data_yx, cksum_cry=0):
-    """Write data_yx, shape [ny, nx], as an ixchel TIFF.  cksum_cry is the POSIX cksum of the
-    crystal-structure cfg (0: not set).  Returns (vmin, vmax), the range of the stored data."""
+def write_ixchel_tiff(filename, data_yx):
+    """Write data_yx, shape [ny, nx], as an ixchel TIFF.  Returns (vmin, vmax), the range of the
+    stored data."""
     Path(filename).parent.mkdir(parents=True, exist_ok=True)
     data = data_yx.astype(np.float32)
     vmin, vmax = float(data.min()), float(data.max())
@@ -42,7 +43,7 @@ def write_ixchel_tiff(filename, data_yx, cksum_cry=0):
         vmax = vmin + 1e-6                               # flat data: no division by zero in the preview
     preview = np.clip((data - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
     preview_rgb = np.stack([preview, preview, preview], axis=-1)
-    meta = np.array([[cksum_cry, 0]], dtype=np.uint32)   # [crystal_struct, simulation]
+    meta = np.zeros((1, 2), dtype=np.uint32)             # the two checksums [crystal_struct, simulation], not set
     with tifffile.TiffWriter(filename) as tfw:
         tfw.write(preview_rgb, photometric='rgb',        contiguous=False)
         tfw.write(data,        photometric='minisblack', contiguous=False)

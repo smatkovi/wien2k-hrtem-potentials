@@ -19,9 +19,10 @@ and dim accordingly.  If they do not fit, the output has the wrong size and
 `ixchel main` stops with "Dimension mismatch".
 Pixel (0, 0) stays at the unit-cell origin, as in ixchel's own atompot.
 
-Page 2 of the output carries the POSIX cksum of the crystal-structure cfg,
-the same value `ixchel atompot` writes, so ixchel does not warn about a
-foreign crystal structure.  The unit is unchanged (Kirkland units, 1/Å).
+The checksum page of the output is left at zero.  `ixchel main` therefore
+prints, for every layer, the warning that the file "was created with a
+different crystal structure config file"; the calculation is not affected.
+The unit is unchanged (Kirkland units, 1/Å).
 
 Usage:
     python3 tiff2ixchel.py --cfg Graphene_ixchel_001.cfg -i ulm_DFT_001 -o sim_DFT
@@ -31,8 +32,8 @@ Usage:
 Arguments and where they come from:
     --cfg        the crystal-structure cfg that `ixchel main -c` will get: written
                  by crystruct --ixchel, with dim and NCELL set to the values of
-                 the run.  Read from it: dim, NCELL and the file name of every
-                 layer (atompot<label>.tif); its checksum goes into the output.
+                 the run.  Read from it: NCELL and the file name of every layer
+                 (atompot<label>.tif).
     -i           the directory with the one-unit-cell layer TIFFs, i.e. the -o
                  directory of vcoul2tiff_ulm.py (ulm_DFT_001 in the README).  The
                  name is free; the files in it carry the layer file names of the cfg.
@@ -40,12 +41,11 @@ Arguments and where they come from:
                  the directory in which `ixchel main` runs, ixchel looks for the
                  layer files there.
 
-Dependencies: numpy, tifffile; the command `cksum` (coreutils)
+Dependencies: numpy, tifffile
 """
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -55,51 +55,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ixchel_tiff import read_ixchel_tiff, write_ixchel_tiff     # noqa: E402
 
 
-# ── file format: the ixchel cfg (only what is needed here) and its checksum ──
+# ── file format: the ixchel cfg (only what is needed here) ──
 
 def parse_cfg(cfg_path):
-    """Return dim, NCELL (ixchel default 1×1) and the unique layer filenames
-    of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
+    """Return NCELL (ixchel default 1×1) and the layer file names of an ixchel cfg
+    (libconfig: '=' or ':', [...] or (...))."""
     text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())          # the cfg without its comments
 
-    def pair(key):
-        """The first two integers of an entry like 'dim = [ 1008, 1008];' or 'NCELL = [ 14, 8, 1];'
-        (None if the cfg has no such entry)."""
-        m = re.search(rf'\b{key}\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
-        return (int(m.group(1)), int(m.group(2))) if m else None
+    # the entry 'NCELL = [ 14, 8, 1];': its first two numbers
+    m = re.search(r'\bNCELL\s*[=:]\s*[\[(]\s*(\d+)\s*,\s*(\d+)', text)
+    ncell = (int(m.group(1)), int(m.group(2))) if m else (1, 1)
 
-    dim = pair('dim')
-    ncell = pair('NCELL') or (1, 1)
-
-    # the entries 'filename = "atompota.tif";' of the layers: every name once, in the order of the file
-    filenames = []
-    for name in re.findall(r'\bfilename\s*[=:]\s*"([^"]+)"', text):
-        if name not in filenames:
-            filenames.append(name)
+    # the entries 'filename = "atompota.tif";', one per layer
+    filenames = re.findall(r'\bfilename\s*[=:]\s*"([^"]+)"', text)
     if not filenames:
         sys.exit(f"Error: no layer 'filename' entries in {cfg_path}")
-    return dim, ncell, filenames
-
-
-def posix_cksum(path):
-    """The checksum of a file as the command `cksum` prints it (POSIX CRC-32).  ixchel computes the
-    same number for its cfg (Checksums::cksum) and compares it with the one stored in a layer file."""
-    result = subprocess.run(['cksum', str(path)], capture_output=True, text=True, check=True)
-    return int(result.stdout.split()[0])            # the output is "<checksum> <size in bytes> <file name>"
+    return ncell, filenames
 
 
 # ── command line ───────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description='Repeat single-unit-cell potential TIFFs over the ixchel supercell')
-    ap.add_argument('--cfg', required=True, help='ixchel crystal-structure cfg (dim, NCELL, layer filenames)')
+    ap.add_argument('--cfg', required=True, help='ixchel crystal-structure cfg (NCELL, layer filenames)')
     ap.add_argument('-i', '--input', required=True, help='directory with one-unit-cell layer TIFFs')
     ap.add_argument('-o', '--output', required=True, help='output directory for ixchel-ready TIFFs')
     args = ap.parse_args()
 
-    dim, ncell, filenames = parse_cfg(args.cfg)
-    cksum = posix_cksum(args.cfg)
-    print(f"cfg {args.cfg}: dim = {dim[0]} x {dim[1]}, NCELL = {ncell[0]} x {ncell[1]}, cksum = {cksum}")
+    ncell, filenames = parse_cfg(args.cfg)
     if Path(args.input).resolve() == Path(args.output).resolve():
         sys.exit("Error: input and output directory must differ")
 
@@ -107,7 +90,7 @@ def main():
         uc = read_ixchel_tiff(Path(args.input) / fn)    # one unit cell, rows = y, columns = x
         out = np.tile(uc, (ncell[1], ncell[0]))         # NCELL_y copies downwards, NCELL_x copies across
         dst = Path(args.output) / fn
-        write_ixchel_tiff(dst, out, cksum)
+        write_ixchel_tiff(dst, out)
         print(f"  {fn}: unit cell {uc.shape[1]} x {uc.shape[0]} px, {ncell[0]} x {ncell[1]} copies -> "
               f"{out.shape[1]} x {out.shape[0]} px, range [{out.min():.4g}, {out.max():.4g}] 1/Å  -> {dst}")
 
