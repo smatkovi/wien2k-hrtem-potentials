@@ -35,20 +35,17 @@ Arguments and where they come from:
     -o           the directory for the ixchel-ready TIFFs (same file names).  Use
                  the directory in which `ixchel main` runs, ixchel looks for the
                  layer files there.
-    --dim        NX NY, replaces the dim of the cfg; it must equal dim in the
-                 simulation cfg given to `ixchel main -s`
-    --drop-edges only for foreign TIFFs that repeat their first row and column;
-                 the scripts of this repository never write such files
 
 Layout of this file: the CORE comes first, tile_fourier, which turns one unit
-cell into the supercell on the ixchel grid.  After the core: the ixchel cfg
-and its checksum, a check of the input and the command line.
+cell into the supercell on the ixchel grid.  After the core: the ixchel cfg,
+its checksum and the command line.
 
-Dependencies: numpy, tifffile
+Dependencies: numpy, tifffile; the command `cksum` (coreutils)
 """
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,8 +53,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ixchel_tiff import read_ixchel_tiff, write_ixchel_tiff     # noqa: E402
-
-read_potential_tiff = read_ixchel_tiff      # former name, still imported by check scripts
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -92,9 +87,9 @@ def tile_fourier(uc, ncell, dim):
     keep = ((2 * np.abs(kx)[None, :] < nx_uc) & (2 * np.abs(ky)[:, None] < ny_uc) &
             (2 * np.abs(KX) < Nx) & (2 * np.abs(KY) < Ny))
 
-    # every kept coefficient goes to its place in the spectrum of the supercell grid; transform back
+    # every kept coefficient goes to its own place in the spectrum of the supercell grid; transform back
     target = np.zeros((Ny, Nx), dtype=complex)
-    np.add.at(target, (KY[keep] % Ny, KX[keep] % Nx), coef[keep])
+    target[KY[keep] % Ny, KX[keep] % Nx] = coef[keep]
     out = np.fft.ifft2(target) * (Nx * Ny)
     imag = float(np.max(np.abs(out.imag)))
     if imag > 1e-6 * max(float(np.max(np.abs(out.real))), 1e-30):
@@ -104,14 +99,14 @@ def tile_fourier(uc, ncell, dim):
 
 
 # ═══════════════════════════════════════════════════════════════
-# END OF CORE.  Below: the ixchel cfg and its checksum, a check, command line
+# END OF CORE.  Below: the ixchel cfg, its checksum, command line
 # ═══════════════════════════════════════════════════════════════
 
 # ── file format: the ixchel cfg (only what the tiling needs) and its checksum ──
 
 def parse_cfg(cfg_path):
-    """Return dim (None if absent), NCELL (ixchel default 1×1) and the unique
-    layer filenames of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
+    """Return dim, NCELL (ixchel default 1×1) and the unique layer filenames
+    of an ixchel cfg (libconfig: '=' or ':', [...] or (...))."""
     text = re.sub(r'#[^\n]*', '', Path(cfg_path).read_text())          # the cfg without its comments
 
     def pair(key):
@@ -121,6 +116,8 @@ def parse_cfg(cfg_path):
         return (int(m.group(1)), int(m.group(2))) if m else None
 
     dim = pair('dim')
+    if dim is None:
+        sys.exit(f"Error: no 'dim' in {cfg_path} (ixchel main needs dim)")
     ncell = pair('NCELL') or (1, 1)
 
     # the entries 'filename = "atompota.tif";' of the layers: every name once, in the order of the file
@@ -134,41 +131,10 @@ def parse_cfg(cfg_path):
 
 
 def posix_cksum(path):
-    """POSIX cksum (CRC-32, polynomial 0x04C11DB7, length appended) — identical
-    to Checksums::cksum in ixchel and to the coreutils `cksum` command."""
-    data = Path(path).read_bytes()
-    crc = 0
-    for b in data:                                  # 1. every byte of the file
-        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ b) & 0xFF]
-    n = len(data)
-    while n > 0:                                    # 2. then the length of the file, lowest byte first
-        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[((crc >> 24) ^ (n & 0xFF)) & 0xFF]
-        n >>= 8
-    return (~crc) & 0xFFFFFFFF                      # 3. all 32 bits inverted
-
-
-def _make_cksum_table():
-    """The table of the CRC above: one 32-bit entry for each of the 256 byte values."""
-    table = []
-    for i in range(256):
-        c = i << 24
-        for _ in range(8):
-            c = ((c << 1) ^ 0x04C11DB7) if (c & 0x80000000) else (c << 1)
-        table.append(c & 0xFFFFFFFF)
-    return table
-
-
-_CKSUM_TABLE = _make_cksum_table()
-
-
-# ── check of the input ─────────────────────────────────────────
-
-def has_duplicate_edges(uc):
-    """True if the last row and column repeat the first ones (XSF general-grid
-    convention: n points span the period inclusively)."""
-    tol = 1e-6 * max(float(np.ptp(uc)), 1e-30)
-    return (np.max(np.abs(uc[0, :] - uc[-1, :])) <= tol and
-            np.max(np.abs(uc[:, 0] - uc[:, -1])) <= tol)
+    """The checksum of a file as the command `cksum` prints it (POSIX CRC-32).  ixchel computes the
+    same number for its cfg (Checksums::cksum) and compares it with the one stored in a layer file."""
+    result = subprocess.run(['cksum', str(path)], capture_output=True, text=True, check=True)
+    return int(result.stdout.split()[0])            # the output is "<checksum> <size in bytes> <file name>"
 
 
 # ── command line ───────────────────────────────────────────────
@@ -178,19 +144,9 @@ def main():
     ap.add_argument('--cfg', required=True, help='ixchel crystal-structure cfg (dim, NCELL, layer filenames)')
     ap.add_argument('-i', '--input', required=True, help='directory with one-unit-cell layer TIFFs')
     ap.add_argument('-o', '--output', required=True, help='output directory for ixchel-ready TIFFs')
-    ap.add_argument('--dim', type=int, nargs=2, metavar=('NX', 'NY'),
-                    help='override dim (must equal dim in simulation.cfg)')
-    ap.add_argument('--drop-edges', action='store_true',
-                    help='drop the last row and column; only for TIFFs that repeat their first '
-                         'row/column (XSF general grid) — the scripts in this repository write '
-                         'periodic grids')
     args = ap.parse_args()
 
     dim, ncell, filenames = parse_cfg(args.cfg)
-    if args.dim:
-        dim = tuple(args.dim)
-    if dim is None:
-        sys.exit(f"Error: no 'dim' in {args.cfg} and no --dim given (ixchel main needs dim)")
     cksum = posix_cksum(args.cfg)
     print(f"cfg {args.cfg}: dim = {dim[0]} x {dim[1]}, NCELL = {ncell[0]} x {ncell[1]}, cksum = {cksum}")
     if Path(args.input).resolve() == Path(args.output).resolve():
@@ -201,24 +157,11 @@ def main():
         if not src.exists():
             print(f"  {fn}: missing in {args.input}, skipped")
             continue
-        uc = read_ixchel_tiff(src)
-        note = ''
-        if uc.shape == (dim[1], dim[0]) and ncell != (1, 1):
-            print(f"  WARNING: {fn} already has the ixchel dim shape {uc.shape}; "
-                  f"it is still treated as ONE unit cell")
-        if args.drop_edges:
-            if not has_duplicate_edges(uc):
-                print(f"  WARNING: {fn}: --drop-edges given, but the last row/column do not "
-                      f"repeat the first ones")
-            uc = uc[:-1, :-1]
-            note = ' (last row/column dropped)'
-        elif has_duplicate_edges(uc):
-            print(f"  NOTE: {fn}: last row/column equal the first ones (flat edges, or an XSF "
-                  f"general grid); kept — pass --drop-edges only for general grids")
+        uc = read_ixchel_tiff(src)                      # one unit cell, [ny, nx]
         out, dropped = tile_fourier(uc, ncell, dim)
         dst = Path(args.output) / fn
         write_ixchel_tiff(dst, out, cksum)
-        print(f"  {fn}: unit cell {uc.shape[1]} x {uc.shape[0]} px{note} -> {dim[0]} x {dim[1]} px, "
+        print(f"  {fn}: unit cell {uc.shape[1]} x {uc.shape[0]} px -> {dim[0]} x {dim[1]} px, "
               f"range [{out.min():.4g}, {out.max():.4g}] 1/Å, "
               f"power above Nyquist dropped {100*dropped:.2e} %  -> {dst}")
 
