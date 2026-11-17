@@ -116,9 +116,9 @@ p. 399: "The 3D potentials were sliced with a resolution of 30 ppÅ".
 * The existing graphene export `74 128 450` has 73 × 127 × 449 unique points,
   i.e. 29.7 × 29.8 × 29.9 ppÅ, and the 15 Å layer sums all 449 planes. For
   `75 127 451` all 450 planes are summed.
-* When nx = nz, the F and C reshapes are exact transposes and cannot be told
-  apart from the data. The script then assumes the standard order F and says
-  so (`--order` overrides).
+* The script reads the values with x running fastest, the order in which
+  `lapw5grid.py` writes them, and stops if a last plane of the grid is not a
+  copy of the first.
 * Layer boundaries from the cfg are rounded to whole voxel planes; there is no
   sub-voxel splitting, which is inherent to the method.
 
@@ -292,8 +292,8 @@ inclined bond centre.
 2. Paper normalisation (subtract max V_C so that min V_s = 0); `--no-normalize`.
 3. Duplicated XSF end planes removed on all axes before cutoff, normalisation
    and projection.
-4. Data order: standard F assumed when the roughness test cannot decide
-   (nx = nz).
+4. Data order: x fastest, as written by `lapw5grid.py`; the script stops if
+   the end planes of the grid are not copies of the first planes.
 5. `--cutoff` is a magnitude (−50000 and 50000 are equivalent); the log counts
    only voxels that were actually replaced.
 6. The [010] in-plane frame is x = +a, y = +c, which is left-handed; crystruct

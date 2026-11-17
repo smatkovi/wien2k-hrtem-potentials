@@ -3,8 +3,7 @@
 vcoul2tiff_ulm.py — re-implementation of the Kurasch et al. (2011) route
 
 Projects the total WIEN2k Coulomb potential (case.vcoul exported to XSF with
-lapw5grid.py, or with 3ddens for lattices other than CXY/CYZ) onto
-ixchel-compatible TIFFs following the recipe of
+lapw5grid.py) onto ixchel-compatible TIFFs following the recipe of
 
     S. Kurasch, J. C. Meyer, D. Künzel, A. Groß, U. Kaiser,
     "Simulation of bonding effects in HRTEM images of light element materials",
@@ -33,14 +32,13 @@ Sign convention:
   pixels" means the neighbour with the largest V_s, i.e. the most negative V_C.
   apply_nn_cutoff() implements this reading.
 
-XSF conventions (3ddens general grid, also written by lapw5grid.py):
-  General grid: n points span 0..L inclusive, the last plane is the periodic
-  image of the first.  The duplicate end planes are dropped along all three
-  axes right after reading, so cutoff (periodic wrap), normalisation and
-  projection work on the periodic grid of n-1 points with voxel size L/(n-1),
-  and every TIFF holds exactly one period (pixel j at j*L/(n-1), as in ixchel).
-  Standard XSF data order is x fastest (Fortran order); it is detected
-  automatically because older exports differed.
+XSF conventions (the general grid of XSF, as written by lapw5grid.py):
+  n points span 0..L inclusive, the last plane is the periodic image of the
+  first.  The duplicate end planes are dropped along all three axes right
+  after reading, so cutoff (periodic wrap), normalisation and projection work
+  on the periodic grid of n-1 points with voxel size L/(n-1), and every TIFF
+  holds exactly one period (pixel j at j*L/(n-1), as in ixchel).  The values
+  are listed with x running fastest.
 
 Supported beam directions: [001], [100], [010] (axis-parallel projections).
 General [hkl] would need a rotated/interpolated grid and is rejected.
@@ -63,7 +61,7 @@ Usage:
         --xsf Graphene_vcoul_DFT.xsf \\
         --cfg Graphene_ixchel_001.cfg \\
         --miller 0 0 1 \\
-        [--cutoff 50000] [--no-normalize] [--order auto|F|C] [-o wien2k_ulm_001]
+        [--cutoff 50000] [--no-normalize] [-o wien2k_ulm_001]
 
 Arguments and where they come from:
     --xsf        the Coulomb potential on a 3D grid: the -o file of lapw5grid.py
@@ -80,7 +78,6 @@ Arguments and where they come from:
     --cutoff     magnitude of the cutoff in volt (default 50000 = the paper's
                  -50 kV); see step 2
     --no-normalize  skip step 3 (smallest V_s set to zero)
-    --order      data order of the XSF (default auto; F = x fastest, C = z fastest)
     -o           output directory (default wien2k_ulm); one TIFF per layer, named
                  as in the cfg.  It is the -i input of tiff2ixchel.py.
 
@@ -110,7 +107,6 @@ from ixchel_tiff import write_ixchel_tiff       # noqa: E402
 # main() at the end of the file calls the steps in order.
 # ═══════════════════════════════════════════════════════════════
 
-BOHR      = 0.529177210903   # Bohr -> Å (not needed for XSF input, kept for reference)
 RY_TO_V   = 13.605693122994  # 1 Ry = 13.606 eV -> potential of an electron: 13.606 V
 H2_2PI_ME = 47.88            # h²/(2π m_e e) [V·Å²]  (Kirkland/ixchel unit of V_z)
 
@@ -175,12 +171,12 @@ def normalise(data_cut):
     return data_cut - v_ref, v_ref
 
 
-def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
+def project_layer(data_cut, cell_ang, miller, z0_ang, cz_lay):
     """
     Sum the 3D potential over the voxels of one ixchel layer along the beam.
 
-    data_cut and shape describe the periodic grid (duplicate XSF end planes
-    already removed): n points per axis, voxel size L/n.  Image frame: see
+    data_cut is the periodic grid (duplicate XSF end planes already removed):
+    n points per axis, voxel size L/n, with L from cell_ang.  Image frame: see
     the module docstring.
 
     Returns:
@@ -198,7 +194,7 @@ def project_layer(data_cut, cell_ang, shape, miller, z0_ang, cz_lay):
 
     # periodic grid: n_pts unique planes at i*span/n_pts (duplicate end plane
     # of the XSF general grid already removed)
-    n_pts, span = shape[axis], cell_ang[axis]
+    n_pts, span = data_cut.shape[axis], cell_ang[axis]
     d_proj = span / n_pts                           # voxel size [Å]
 
     # map the layer boundaries (from the cfg) onto voxel planes
@@ -234,48 +230,14 @@ def to_kirkland(proj_raw, d_proj):
 # END OF CORE.  Below: file formats (XSF, ixchel cfg), command line
 # ═══════════════════════════════════════════════════════════════
 
-# ── file format: the XSF reader, step 1 (with automatic detection of the data order) ──
+# ── file format: the XSF reader, step 1 ──
 
-def _roughness(d):
-    """Mean absolute neighbour difference over all three axes.  Correctly
-    ordered potential data is smooth (except at the cusps) -> small; scrambled
-    data is quasi-noise -> large."""
-    return sum(np.mean(np.abs(np.diff(d, axis=ax))) for ax in range(3))
-
-
-def _reshape_xsf(vals, nx, ny, nz, order):
-    """order: 'F' (standard XSF, x fastest), 'C' (z fastest),
-       'auto' (decide by smoothness)."""
-    arr = np.asarray(vals[:nx * ny * nz], dtype=np.float64)
-    if order in ('F', 'C'):
-        return arr.reshape((nx, ny, nz), order=order), order
-    dF = arr.reshape((nx, ny, nz), order='F')
-    if nx == nz:
-        # the C reshape is then exactly the F reshape with x and z swapped, and
-        # the roughness (a sum over all axes) is identical for both
-        print(f"    data order: 'F' (standard XSF)  [auto-detection cannot discriminate "
-              f"for nx == nz; pass --order C for a non-standard file]")
-        return dF, 'F'
-    dC = arr.reshape((nx, ny, nz), order='C')
-    rF, rC = _roughness(dF), _roughness(dC)
-    if np.isclose(rF, rC, rtol=1e-6, atol=0.0):
-        print(f"    data order: 'F' (standard XSF)  [auto-detection cannot discriminate: "
-              f"roughness F={rF:.6g} ~ C={rC:.6g}; pass --order C for a non-standard file]")
-        return dF, 'F'
-    if rF < rC:
-        print(f"    data order: 'F' (standard XSF)  [roughness F={rF:.4g} < C={rC:.4g}]")
-        return dF, 'F'
-    print(f"    data order: 'C' (non-standard)  [roughness C={rC:.4g} < F={rF:.4g}]")
-    return dC, 'C'
-
-
-def read_xsf(path, order='auto'): #step 1 in order of execution
+def read_xsf(path): #step 1 in order of execution
     """
-    Read a 3D data grid from an XSF file written by WIEN2k 3ddens or by
-    lapw5grid.py (same general-grid convention).  The vectors that span the
-    grid are in Å, values in Ry.
+    Read the 3D data grid of an XSF file written by lapw5grid.py.
 
-    Returns: data [nx,ny,nz] (Ry), (ax,by,cz) [Å], (nx,ny,nz)
+    Returns: the values as an array [nx, ny, nz] (Ry) and the lengths (ax, by, cz)
+    of the three vectors that span the grid (Å).
     """
     with open(path) as f:
         lines = f.readlines()
@@ -308,54 +270,37 @@ def read_xsf(path, order='auto'): #step 1 in order of execution
     if len(vals) < nx * ny * nz:
         sys.exit(f"Error: too few data points ({len(vals)} < {nx*ny*nz}).")
 
-    data, _ = _reshape_xsf(vals, nx, ny, nz, order)                 # the list of numbers as an array [nx, ny, nz]
-    return data, (np.linalg.norm(va), np.linalg.norm(vb), np.linalg.norm(vc)), (nx, ny, nz)   # lengths in Å
+    # the list of numbers as an array [nx, ny, nz]; order='F': the first index (x) runs fastest in the file
+    data = np.array(vals[:nx * ny * nz]).reshape((nx, ny, nz), order='F')
+    return data, (np.linalg.norm(va), np.linalg.norm(vb), np.linalg.norm(vc))
 
 
 def drop_periodic_duplicates(data):
     """
-    Remove the duplicated end plane of the XSF general grid along each axis.
+    Remove the last plane of the XSF grid along each axis.
 
-    3ddens writes n points spanning 0..L inclusive, so plane n-1 is the
-    periodic image of plane 0.  The plane is dropped only if it really equals
-    plane 0; otherwise a warning is printed and the plane is kept, i.e. that
-    axis is taken as an already periodic grid of n points (voxel size L/n).
+    The XSF grid has n points from 0 to L, both ends included, so its last plane
+    is the periodic image of the first.  Without it the grid is periodic: n - 1
+    points per axis, voxel size L/(n-1).
 
-    Returns data with the periodic shape (n_x, n_y, n_z); the voxel size along
-    each axis is then L/n for that n.
+    Stops if a last plane is not a copy of the first.  Then the grid box is not
+    a periodic cell (lapw5grid.py --edges must be lattice vectors) or the file
+    does not list its values with x running fastest.
     """
-    for ax, name in enumerate('xyz'):
-        n = data.shape[ax]
-        if n < 2:
-            continue
-        first = np.take(data, 0, axis=ax)
-        last  = np.take(data, n - 1, axis=ax)
-        if np.allclose(first, last, rtol=1e-5, atol=1e-8):
-            data = np.take(data, np.arange(n - 1), axis=ax)
-        else:
-            dev = float(np.max(np.abs(first - last)))
-            print(f"    WARNING: last {name} plane differs from the first (max |diff| = "
-                  f"{dev:.3g} Ry); kept, {name} treated as a periodic grid of {n} points")
-    return data
+    for axis, name in enumerate('xyz'):
+        first = np.take(data, 0, axis=axis)
+        last = np.take(data, -1, axis=axis)
+        if not np.allclose(first, last, rtol=1e-5, atol=1e-8):
+            sys.exit(f"Error: the last {name} plane of the grid is not a copy of the first "
+                     f"(largest difference {np.max(np.abs(first - last)):.3g} Ry); "
+                     f"the grid box must be a periodic cell")
+    return data[:-1, :-1, :-1]
 
 
-# ── file format: the ixchel cfg written by crystruct (layer sizes, stacking) ──
-
-def _block_end(text, start):
-    """Index of the '}' that closes the '{' at text[start]; len(text) if it is never closed."""
-    depth = 0
-    for j in range(start, len(text)):
-        if text[j] == '{':
-            depth += 1
-        elif text[j] == '}':
-            depth -= 1
-            if depth == 0:
-                return j
-    return len(text)
-
+# ── file format: the ixchel cfg written by crystruct (layer thickness, file name, stacking) ──
 
 def parse_cfg(cfg_path):
-    """Read the layer geometry (size_uc, filename, stacking) from an ixchel cfg."""
+    """Read the layers (thickness, file name) and their stacking from an ixchel cfg."""
     text = Path(cfg_path).read_text()
 
     # The parts of the cfg that are read, here rutile [001] with the two layers a and b (written by crystruct):
@@ -371,40 +316,26 @@ def parse_cfg(cfg_path):
     stack_match = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
     if not stack_match:
         sys.exit("Error: stack_seq not found in cfg.")
-    layers_match = re.search(r'layers\s*=\s*\{', text)
-    if not layers_match:
-        sys.exit("Error: layers block not found in cfg.")
-    layers_text = text[layers_match.end():_block_end(text, layers_match.end() - 1)]     # inside "layers = { ... }"
 
-    # one block "<letter> = { ... }" per layer
-    layer_defs = {}                                 # label -> size and file name of that layer
-    pos = 0
-    while pos < len(layers_text):
-        label_match = re.search(r'\b([a-z])\s*=\s*\{', layers_text[pos:])
-        if not label_match:
-            break
-        open_brace = pos + label_match.end() - 1                # the '{' of this layer
-        close_brace = _block_end(layers_text, open_brace)       # and the '}' that belongs to it
-        block = layers_text[open_brace + 1:close_brace]
-        size_match = re.search(
-            r'size_uc\s*=\s*\{[^}]*x\s*=\s*([0-9.E+\-]+)[^}]*'
-            r'y\s*=\s*([0-9.E+\-]+)[^}]*z\s*=\s*([0-9.E+\-]+)', block)
+    # Every layer starts with a line "<letter> = {"; its text runs up to the start of the next layer.
+    starts = list(re.finditer(r'^\s*([a-z])\s*=\s*\{', text, re.MULTILINE))
+    layer_defs = {}                                 # label -> thickness [Å] and file name of that layer
+    for n, start in enumerate(starts):
+        end = starts[n + 1].start() if n + 1 < len(starts) else len(text)
+        block = text[start.end():end]
+        size_match = re.search(r'size_uc\s*=\s*\{[^}]*z\s*=\s*([0-9.E+\-]+)', block)
         file_match = re.search(r'filename\s*=\s*\"([^\"]+)\"', block)
         if size_match and file_match:
-            layer_defs[label_match.group(1)] = {
-                'ax': float(size_match.group(1)), 'by': float(size_match.group(2)),
-                'cz': float(size_match.group(3)), 'filename': file_match.group(1)}
-        pos = close_brace + 1
+            layer_defs[start.group(1)] = {'cz': float(size_match.group(1)), 'filename': file_match.group(1)}
 
     # the layers in stacking order; z0 is the depth at which a layer starts
     layers = []
     z0 = 0.0
     for label in stack_match.group(1):              # the stacking sequence, one letter per layer
         if label not in layer_defs:
-            sys.exit(f"Error: layer '{label}' not defined in layers block.")
+            sys.exit(f"Error: layer '{label}' not defined in the cfg.")
         ld = layer_defs[label]
-        layers.append({'label': label, 'ax': ld['ax'], 'by': ld['by'], 'cz': ld['cz'],
-                       'z0': z0, 'filename': ld['filename']})
+        layers.append({'label': label, 'cz': ld['cz'], 'z0': z0, 'filename': ld['filename']})
         z0 += ld['cz']
     return {'layers': layers, 'total_z': z0}
 
@@ -413,13 +344,10 @@ def parse_cfg(cfg_path):
 
 def main():
     ap = argparse.ArgumentParser(description='Kurasch et al. (2011) route: vcoul XSF -> ixchel TIFF')
-    ap.add_argument('--xsf', required=True,
-                    help='total Coulomb potential as XSF (3ddens on case.vcoul; for CXY/CYZ '
-                         'lattices use lapw5grid.py, 3ddens misses the centring atoms)')
+    ap.add_argument('--xsf', required=True, help='total Coulomb potential as XSF (lapw5grid.py on case.vcoul)')
     ap.add_argument('--cfg', required=True, help='ixchel crystruct.cfg (layer geometry)')
     ap.add_argument('--miller', type=int, nargs=3, default=[0, 0, 1], metavar=('H', 'K', 'L'),
                     help='beam direction (default: 0 0 1)')
-    ap.add_argument('--order', choices=['auto', 'F', 'C'], default='auto', help='XSF data order (default: auto)')
     ap.add_argument('--cutoff', type=float, default=50000,
                     help='cutoff magnitude in volt, the sign is ignored: voxels with '
                          'V_C < -|cutoff| are replaced (default: 50000, paper: -50 kV)')
@@ -438,7 +366,8 @@ def main():
 
     # -- 1. read XSF -------------------------------------------------
     print(f"\n[1] reading XSF: {args.xsf}")
-    data_3d, (ax_ang, by_ang, cz_ang), (nx, ny, nz) = read_xsf(args.xsf, args.order)
+    data_3d, (ax_ang, by_ang, cz_ang) = read_xsf(args.xsf)
+    nx, ny, nz = data_3d.shape
     print(f"    grid:       {nx} x {ny} x {nz} points (XSF general grid)")
     data_3d = drop_periodic_duplicates(data_3d)
     nx, ny, nz = data_3d.shape
@@ -477,8 +406,8 @@ def main():
     print(f"\n[5] projecting layer by layer ...")
     outs = []
     for ly in layers:
-        proj_raw, d_proj, n_slices = project_layer(data_cut, (ax_ang, by_ang, cz_ang), (nx, ny, nz),
-                                                   (h, k, l), ly['z0'], ly['cz'])
+        proj_raw, d_proj, n_slices = project_layer(data_cut, (ax_ang, by_ang, cz_ang), (h, k, l),
+                                                   ly['z0'], ly['cz'])
         if proj_raw is None:
             print(f"\n  layer '{ly['label']}': no voxel planes in "
                   f"z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")

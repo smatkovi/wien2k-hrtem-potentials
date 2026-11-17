@@ -44,7 +44,7 @@ for k in ('DFT', 'IAM'):
     # ixchel TIFF: page 0 RGB preview, page 1 float32 data [1/Å], page 2 metadata
     tif = tifffile.imread(d / f'ulm_{k}_001' / 'atompota.tif', key=1).astype(np.float64)
     # (2) the 3D grid it was made from, once more with and once without the cutoff
-    data, (_, _, cz), _ = ulm.read_xsf(d / f'Graphene_vcoul_{k}_ongrid.xsf')
+    data, (_, _, cz) = ulm.read_xsf(d / f'Graphene_vcoul_{k}_ongrid.xsf')
     data = ulm.drop_periodic_duplicates(data)                    # periodic grid
     nz = data.shape[2]
     dz = cz / nz
