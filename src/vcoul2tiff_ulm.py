@@ -165,10 +165,8 @@ def normalise(data_cut):
     global phase in the multislice calculation, but it matters for any
     comparison with IAM potentials, which vanish in vacuum.
 
-    Returns (shifted data, v_ref); v_ref is the value that was subtracted [Ry].
     """
-    v_ref = float(data_cut.max())
-    return data_cut - v_ref, v_ref
+    return data_cut - data_cut.max()
 
 
 def project_layer(data_cut, cell_ang, miller, z0_ang, cz_lay):
@@ -348,73 +346,31 @@ def main():
     ap.add_argument('-o', '--output', default='wien2k_ulm', help='output directory')
     args = ap.parse_args()
 
-    h, k, l   = args.miller
-    cutoff_V  = abs(args.cutoff)        # paper "-50 kV" in WIEN2k sign == magnitude 50000
-    cutoff_Ry = cutoff_V / RY_TO_V      # 50000 V / 13.606 V/Ry ~ 3675 Ry
-    out_dir   = args.output
+    cutoff_ry = abs(args.cutoff) / RY_TO_V          # the sign of --cutoff is ignored; 50000 V = 3675 Ry
 
-    # The numbers in brackets that are printed, [1] ... [5], are the numbering of the log, not the steps
-    # of the method: [4] is the cfg and [5] the projection together with the unit conversion.
-
-    # -- 1. read XSF -------------------------------------------------
-    print(f"\n[1] reading XSF: {args.xsf}")
-    data_3d, (ax_ang, by_ang, cz_ang) = read_xsf(args.xsf)
-    nx, ny, nz = data_3d.shape
-    print(f"    grid:       {nx} x {ny} x {nz} points (XSF general grid)")
+    # step 1: the grid, without its duplicate end planes
+    data_3d, cell_ang = read_xsf(args.xsf)
     data_3d = drop_periodic_duplicates(data_3d)
     nx, ny, nz = data_3d.shape
-    print(f"    periodic:   {nx} x {ny} x {nz} points (duplicate end planes removed)")
-    print(f"    cell:       {ax_ang:.4f} x {by_ang:.4f} x {cz_ang:.4f} Å  "
-          f"({nx/ax_ang:.1f} x {ny/by_ang:.1f} x {nz/cz_ang:.1f} points/Å)")
-    print(f"    V_C (raw):  [{data_3d.min():.1f}, {data_3d.max():.3f}] Ry"
-          f" = [{data_3d.min()*RY_TO_V:.0f}, {data_3d.max()*RY_TO_V:.2f}] V")
+    print(f"grid: {nx} x {ny} x {nz} points per cell of {cell_ang[0]:.4f} x {cell_ang[1]:.4f} x {cell_ang[2]:.4f} Å")
 
-    # -- 2. nearest-neighbour cutoff ---------------------------------
-    print(f"\n[2] nearest-neighbour cutoff at -{cutoff_V:.0f} V = -{cutoff_Ry:.1f} Ry (6 neighbours)")
-    if args.cutoff < 0:
-        print(f"    (--cutoff {args.cutoff:.0f} taken as magnitude {cutoff_V:.0f} V)")
-    n_over = int((data_3d < -cutoff_Ry).sum())
-    print(f"    voxels below -cutoff: {n_over} of {data_3d.size} ({100*n_over/data_3d.size:.4f}%)")
-    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry)
-    print(f"    replaced:  {n_replaced} voxels")
-    print(f"    V_C (after cutoff): [{data_cut.min()*RY_TO_V:.0f}, {data_cut.max()*RY_TO_V:.2f}] V")
+    # step 2: cutoff
+    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_ry)
+    print(f"replaced: {n_replaced} voxels")
 
-    # -- 3. normalisation --------------------------------------------
-    if args.no_normalize:
-        v_ref = 0.0
-        print(f"\n[3] normalisation skipped (--no-normalize)")
-    else:
-        data_cut, v_ref = normalise(data_cut)
-        print(f"\n[3] normalisation: V_C shifted by -{v_ref:.5f} Ry = -{v_ref*RY_TO_V:.3f} V "
-              f"so that min(V_s) = 0")
+    # step 3: normalisation
+    if not args.no_normalize:
+        data_cut = normalise(data_cut)
 
-    # -- the layers from the cfg -------------------------------------
-    print(f"\n[4] reading cfg: {args.cfg}")
-    cfg = parse_cfg(args.cfg)
-    layers = cfg['layers']
-    print(f"    {len(layers)} layer(s), total thickness {cfg['total_z']:.3f} Å,  beam [{h}{k}{l}]")
-
-    # -- 4./5. projection per layer, conversion to 1/Å, TIFF ---------
-    print(f"\n[5] projecting layer by layer ...")
-    outs = []
-    for ly in layers:
-        proj_raw, d_proj, n_slices = project_layer(data_cut, (ax_ang, by_ang, cz_ang), (h, k, l),
-                                                   ly['z0'], ly['cz'])
+    # steps 4 and 5 for every layer of the cfg: projection, conversion to 1/Å, TIFF
+    for ly in parse_cfg(args.cfg)['layers']:
+        proj_raw, d_proj, n_slices = project_layer(data_cut, cell_ang, args.miller, ly['z0'], ly['cz'])
         if proj_raw is None:
-            print(f"\n  layer '{ly['label']}': no voxel planes in "
-                  f"z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")
+            print(f"layer '{ly['label']}': no voxel planes in z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å, skipped")
             continue
-        proj_yx = to_kirkland(proj_raw, d_proj)
-        print(f"\n  layer '{ly['label']}': z = {ly['z0']:.3f} ... {ly['z0']+ly['cz']:.3f} Å  "
-              f"({n_slices} planes, d = {d_proj*1000:.1f} mÅ)")
-        print(f"    V_z: [{proj_yx.min():.4f}, {proj_yx.max():.4f}] 1/Å"
-              f" = [{proj_yx.min()*H2_2PI_ME:.1f}, {proj_yx.max()*H2_2PI_ME:.1f}] V·Å")
-        fname = f"{out_dir}/{ly['filename']}"
-        vmin, vmax = write_ixchel_tiff(fname, proj_yx)
-        print(f"    -> {fname}  [{vmin:.4g} ... {vmax:.4g}] 1/Å")
-        outs.append(fname)
-
-    print(f"\nDone -- {len(outs)} file(s) in '{out_dir}/'")
+        fname = f"{args.output}/{ly['filename']}"
+        vmin, vmax = write_ixchel_tiff(fname, to_kirkland(proj_raw, d_proj))
+        print(f"wrote {fname}: layer '{ly['label']}', {n_slices} planes, V_z from {vmin:.4g} to {vmax:.4g} 1/Å")
 
 
 if __name__ == '__main__':
