@@ -21,19 +21,16 @@ check passes; only a stale case.rsp needs `x lstart` first.
 
 Usage (in the case directory, right after `x dstart`):
     python3 check_dstart.py Graphene
-    python3 check_dstart.py --outputd Graphene.outputd --struct Graphene.struct
 
-Arguments and where they come from:
+Argument and where it comes from:
     Graphene     the WIEN2k case name (the name of the case directory and of its
-                 files); short for the two options below
-    --outputd    case.outputd, the log file that `x dstart` has just written
-    --struct     case.struct, the structure file of the case (the one the case
-                 was initialised with)
+                 files).  Two files of the case are read:
+                 Graphene.outputd   the log file that `x dstart` has just written
+                 Graphene.struct    the structure file of the case
 
 Dependencies: none beyond the standard library
 """
 
-import argparse
 import re
 import sys
 from pathlib import Path
@@ -57,15 +54,10 @@ def struct_atoms(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Check a dstart run (IAM density) for the known WIEN2k 24.1 pitfalls')
-    ap.add_argument('case', nargs='?', help='case name (uses <case>.outputd and <case>.struct)')
-    ap.add_argument('--outputd')
-    ap.add_argument('--struct')
-    args = ap.parse_args()
-    outputd = args.outputd or (f"{args.case}.outputd" if args.case else None)
-    struct = args.struct or (f"{args.case}.struct" if args.case else None)
-    if not outputd or not struct:
-        ap.error('give a case name or both --outputd and --struct')
+    if len(sys.argv) != 2:
+        sys.exit("usage: check_dstart.py <case>    (in the case directory; reads <case>.outputd and <case>.struct)")
+    outputd = f"{sys.argv[1]}.outputd"
+    struct = f"{sys.argv[1]}.struct"
 
     text = Path(outputd).read_text(errors='replace')
     atoms = struct_atoms(struct)
