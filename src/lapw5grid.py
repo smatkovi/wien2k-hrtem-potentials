@@ -18,10 +18,7 @@ F, B, CXZ and R lattices (SRC_3ddens/3ddens.F:403), so for CXY and CYZ
 lattices (e.g. graphene) the sphere contributions of the centring atoms are
 missing.  lapw5 has no such restriction.
 
-Values are written by lapw5 with 9 significant digits (5ES16.8).  With
-`sub` the second file is subtracted inside lapw5 in double precision before
-output, so for vcoul_DFT - vcoul_IAM the -2Z/r nuclear terms cancel exactly
-and the difference is finite everywhere.
+Values are written by lapw5 with 9 significant digits (5ES16.8).
 
 Units: ATU, i.e. Ry for potentials and e/bohr^3 for densities.  norm='val'
 for potentials and valence densities, norm='tot' for case.clmsum (lapw5 then
@@ -33,7 +30,6 @@ one period therefore has n-1 points, choose n-1 so that the nuclei lie on
 grid points, e.g. 75 127 451 = 74 x 126 x 450 periodic for graphene):
 
     python3 lapw5grid.py --struct case.struct --clm case.vcoul --grid 75 127 451 -o case_vcoul.xsf
-    python3 lapw5grid.py --struct case.struct --clm case.vcoul_DFT --sub case.vcoul_IAM --grid ... -o dV.xsf
     python3 lapw5grid.py --struct case.struct --clm case.clmsum --norm tot --grid ... -o rho.xsf
 
 Other cells (--edges, --origin): by default the grid spans the conventional
@@ -61,8 +57,6 @@ Arguments and where they come from:
                  In the DFT-vs-IAM workflow these are copies made by hand (README,
                  steps 2 and 3): case.vcoul_DFT after the SCF, case.vcoul_IAM after
                  `x dstart` + `x lapw0`.
-    --sub        optional second file of the same kind; lapw5 subtracts it from
-                 --clm before the values are written (e.g. case.vcoul_IAM)
     --norm       how lapw5 scales the spherical (L=0) part: val for potentials and
                  valence densities (default), tot for case.clmsum
     --grid       NX NY NZ, the number of points along the three grid edges, both
@@ -73,11 +67,7 @@ Arguments and where they come from:
                  conventional cell).  Choose the cell the ixchel cfg describes,
                  i.e. the same triplet as given to crystruct --ixchel.
     --origin     where the box starts (default 0 0 0)
-    --nshell     smallest NSHELL (neighbour shells) passed to lapw5 (default 2 2 2);
-                 raised automatically where a plane needs more
     --nproc      number of lapw5 runs at the same time (default: all cores but two)
-    --workdir    directory that keeps the lapw5 input and output files of every
-                 plane (default: a temporary directory, deleted afterwards)
     -o           the XSF file to write.  For a potential it is the --xsf input of
                  vcoul2tiff_ulm.py.
 
@@ -117,17 +107,17 @@ BOHR = 0.529177210903   # Bohr -> Å
 
 # The file list ("def file") that lapw5c gets as its only argument, one line per Fortran unit:
 #     5  the input file, written in plane()         9  the file to evaluate
-#     6  the log of lapw5                          11  the file to subtract (only with clm_b)
-#     8  the struct file                           21  the result: the values on the plane
-#    10, 12, 20  further files that lapw5 opens; this script does not read them
+#     6  the log of lapw5                          21  the result: the values on the plane
+#     8  the struct file
+#    10, 11, 12, 20  further files that lapw5 opens; this script does not read them
 # {tag} becomes the name of the plane, so that several lapw5 runs can work side by side.
 DEF = """\
 5 ,'{tag}.in5','old','formatted',0
 6 ,'{tag}.output5','unknown','formatted',0
 8 ,'case.struct','old','formatted',0
-9 ,'clm_a','old','formatted',0
+9 ,'case.clm','old','formatted',0
 10,'{tag}.tmp','unknown','unformatted',0
-11,'{unit11}','unknown','formatted',0
+11,'{tag}.none','unknown','formatted',0
 12,'{tag}.sigma','unknown','formatted',0
 20,'{tag}.rho_onedim','unknown','formatted',0
 21,'{tag}.rho','unknown','formatted',0
@@ -135,46 +125,29 @@ DEF = """\
 
 
 class Lapw5Runner:
-    """Evaluate clm_a (optionally clm_a - clm_b) on planes with lapw5.
+    """Evaluate a WIEN2k file on planes with lapw5.
 
-        runner = Lapw5Runner('case.struct', 'case.vcoul')      # prepares a working directory
+        runner = Lapw5Runner('case.struct', 'case.vcoul')      # prepares a temporary working directory
         data = runner.grid3d(origin, edges, (nx, ny, nz))      # one lapw5c run per plane
-        runner.close()                                         # removes the temporary directory
+        runner.close()                                         # removes the working directory
     """
 
-    def __init__(self, struct_path, clm_a, clm_b=None, norm='val', nshell=(2, 2, 2),
-                 workdir=None, nproc=None, keep=False):
+    def __init__(self, struct_path, clm, norm='val', nproc=None):
         """struct_path  the case.struct file
-        clm_a        the file to evaluate (case.vcoul, case.clmsum, ...)
-        clm_b        optional second file: lapw5 then returns clm_a - clm_b
+        clm          the file to evaluate (case.vcoul, case.clmsum, ...)
         norm         'val' or 'tot' (see the module docstring)
-        nshell       smallest NSHELL given to lapw5; raised per plane if needed
-        workdir      directory in which lapw5 runs (default: a temporary one)
-        nproc        number of lapw5 runs at the same time (default: all cores but two)
-        keep         do not delete the lapw5 files afterwards"""
+        nproc        number of lapw5 runs at the same time (default: all cores but two)"""
         self.norm = norm.upper()
-        check_inputs(self.norm, [clm_a] + ([clm_b] if clm_b else []))     # stops here if something is missing
-        self.sub = clm_b is not None    # True: lapw5 subtracts clm_b
-        self.nshell = nshell
+        check_inputs(self.norm, clm)                    # stops here if something is missing
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
-        self.keep = keep
 
-        # the working directory: lapw5 runs here, nothing is written into the case directory
-        self._tmp = None                # the temporary directory, if this object created one
-        if workdir is None:
-            self._tmp = tempfile.mkdtemp(prefix='lapw5grid_')
-            workdir = self._tmp
-        self.wd = Path(workdir)
-        self.wd.mkdir(parents=True, exist_ok=True)
-
-        # links with fixed names, so that every def file can say 'case.struct', 'clm_a' and 'clm_b'
-        for name, src in (('case.struct', struct_path), ('clm_a', clm_a), ('clm_b', clm_b)):
-            (self.wd / name).unlink(missing_ok=True)    # stale link of an earlier run
-            if src:
-                (self.wd / name).symlink_to(Path(src).resolve())
+        # the working directory: lapw5 runs here, nothing is written into the case directory.
+        # Links with fixed names, so that every def file can say 'case.struct' and 'case.clm'.
+        self.wd = Path(tempfile.mkdtemp(prefix='lapw5grid_'))
+        (self.wd / 'case.struct').symlink_to(Path(struct_path).resolve())
+        (self.wd / 'case.clm').symlink_to(Path(clm).resolve())
 
         self._counter = 0               # numbers the planes of direct plane() calls
-        self._grid_calls = 0            # numbers the grid3d() calls
 
     def grid3d(self, origin, edges, counts, progress=True):
         """Values at origin + i/(n0-1) e0 + j/(n1-1) e1 + k/(n2-1) e2 for all
@@ -191,14 +164,12 @@ class Lapw5Runner:
         stack_axis = int(np.argmin(counts))
         x_axis, y_axis = [ax for ax in range(3) if ax != stack_axis]
         n_planes = counts[stack_axis]
-        self._grid_calls += 1
-        call = self._grid_calls                 # file names unique across calls (--workdir)
 
         def one_plane(m):
             """Plane number m: its origin lies m/(n_planes-1) of the way along the stacking edge."""
             o = origin + edges[stack_axis] * (m / (n_planes - 1))
             return self.plane(o, o + edges[x_axis], o + edges[y_axis], counts[x_axis], counts[y_axis],
-                              tag=f"g{call:03d}_{m:05d}")
+                              tag=f"g{m:05d}")
 
         # nproc planes at a time.  Threads are enough: each one only waits for its lapw5c process.
         planes = []
@@ -218,11 +189,11 @@ class Lapw5Runner:
         wd = self.wd
 
         # 1. NSHELL: lapw5 looks for muffin-tin spheres only among the cell origins
-        #    -NSHELL..+NSHELL, so every corner of the plane must lie well inside
+        #    -NSHELL..+NSHELL, so every corner of the plane must lie well inside (at least 2 cells)
         o, x, y = (np.asarray(v, float) for v in (origin, xend, yend))
         corners = [o, x, y, x + y - o]                              # the fourth one lies opposite the origin
         reach = np.abs(corners).max(axis=0)                         # farthest corner along each cell axis
-        nshell = [max(int(minimum), math.ceil(far - 1e-9) + 1) for minimum, far in zip(self.nshell, reach)]
+        nshell = [max(2, math.ceil(far - 1e-9) + 1) for far in reach]
 
         # 2. the input file of lapw5, one list entry per line of the file
         in5 = ["%d %d %d %d" % _int_vector(origin),        # origin of the plane, as IX IY IZ IDV (see _int_vector)
@@ -230,13 +201,13 @@ class Lapw5Runner:
                "%d %d %d %d" % _int_vector(yend),          # end point of its y edge
                "%d %d %d" % tuple(nshell),                 # NSHELL along the three cell axes
                "%d %d" % (npx, npy),                       # number of points along the x and the y edge
-               "RHO SUB " if self.sub else "RHO     ",     # evaluate the file; SUB: minus the second file
+               "RHO     ",                                 # evaluate the file as it is
                f"ATU {self.norm} NODEBUG",                 # atomic units; normalisation VAL or TOT
                "NONORTHO"]                                 # the two edges need not be perpendicular
         (wd / f"{tag}.in5").write_text("\n".join(in5) + "\n")
 
         # 3. the file list of this plane, from the template DEF
-        (wd / f"{tag}.def").write_text(DEF.format(tag=tag, unit11='clm_b' if self.sub else f"{tag}.none"))
+        (wd / f"{tag}.def").write_text(DEF.format(tag=tag))
 
         # 4. run lapw5c in the working directory (one core per run, since several run side by side)
         res = subprocess.run(['lapw5c', f"{tag}.def"], cwd=wd, capture_output=True, text=True,
@@ -252,16 +223,13 @@ class Lapw5Runner:
             raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
 
         # 6. remove the files of this plane
-        if not self.keep:
-            for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
-                (wd / f"{tag}.{ext}").unlink(missing_ok=True)
+        for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
+            (wd / f"{tag}.{ext}").unlink(missing_ok=True)
         return vals.reshape((npx, npy))            # lapw5 (prtrh.f) writes x in the outer loop, y in the inner
 
     def close(self):
-        """Remove the temporary working directory, unless keep is set.  A directory that was passed
-        as workdir is never removed."""
-        if self._tmp and not self.keep:
-            shutil.rmtree(self._tmp, ignore_errors=True)
+        """Remove the working directory."""
+        shutil.rmtree(self.wd, ignore_errors=True)
 
 
 def _int_vector(frac3, max_den=10**6):
@@ -419,14 +387,13 @@ def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (
 
 # ── checks and error messages ──────────────────────────────────
 
-def check_inputs(norm, clm_files):
+def check_inputs(norm, clm):
     """Before the first lapw5 run: stop with a clear message if the request cannot work."""
     if norm not in ('VAL', 'TOT'):
         raise ValueError("norm must be 'val' or 'tot'")
-    for p in clm_files:
-        if not Path(p).is_file() or Path(p).stat().st_size == 0:
-            sys.exit(f"Error: {p} missing or empty (for case.vcoul: R2V must be set in case.in0)")
-        check_clm_header(p)
+    if not Path(clm).is_file() or Path(clm).stat().st_size == 0:
+        sys.exit(f"Error: {clm} missing or empty (for case.vcoul: R2V must be set in case.in0)")
+    check_clm_header(clm)
     if shutil.which('lapw5c') is None:
         sys.exit("Error: lapw5c not found on PATH (source the WIEN2k environment)")
 
@@ -464,7 +431,6 @@ def main():
     ap = argparse.ArgumentParser(description='Evaluate a WIEN2k clm-type file on a 3D grid with lapw5 and write XSF')
     ap.add_argument('--struct', required=True)
     ap.add_argument('--clm', required=True, help='case.vcoul, case.clmsum, ... (lapw5 unit 9)')
-    ap.add_argument('--sub', help='second file subtracted inside lapw5 (unit 11), e.g. case.vcoul_IAM')
     ap.add_argument('--norm', choices=['val', 'tot'], default='val',
                     help="'val' for potentials/valence densities, 'tot' for case.clmsum (default val)")
     ap.add_argument('--grid', type=int, nargs=3, required=True, metavar=('NX', 'NY', 'NZ'),
@@ -475,17 +441,13 @@ def main():
     ap.add_argument('--edges', type=Fraction, nargs=9, default=[Fraction(x) for x in (1, 0, 0, 0, 1, 0, 0, 0, 1)],
                     metavar='E', help='the three grid edge vectors, fractional coordinates of the conventional '
                                       'cell (default: the conventional cell, 1 0 0  0 1 0  0 0 1)')
-    ap.add_argument('--nshell', type=int, nargs=3, default=[2, 2, 2])
     ap.add_argument('--nproc', type=int, default=None)
-    ap.add_argument('--workdir', default=None, help='keep lapw5 files here (default: temporary)')
     ap.add_argument('-o', '--output', required=True)
     args = ap.parse_args()
 
     struct = read_struct(args.struct)
     print(f"struct {args.struct}: lattice {struct['lattice']}, a,b,c = "
           f"{', '.join(f'{x*BOHR:.4f}' for x in struct['abc_bohr'])} Å")
-    runner = Lapw5Runner(args.struct, args.clm, args.sub, args.norm, tuple(args.nshell),
-                         args.workdir, args.nproc, keep=args.workdir is not None)
     origin = [float(x) for x in args.origin]
     edges = [[float(x) for x in args.edges[3 * i:3 * i + 3]] for i in range(3)]
     if abs(np.linalg.det(np.array(edges))) < 1e-9:
@@ -493,11 +455,12 @@ def main():
     for e in edges:
         if not is_lattice_translation(e, struct['lattice']):
             print(f"WARNING: edge {e} is not a lattice translation; the grid is not periodic along it")
+    runner = Lapw5Runner(args.struct, args.clm, args.norm, args.nproc)
     try:
         data = runner.grid3d(origin, edges, args.grid)
     finally:
         runner.close()
-    what = f"{Path(args.clm).name}" + (f" - {Path(args.sub).name}" if args.sub else '')
+    what = Path(args.clm).name
     write_xsf(args.output, data, struct, f"{what}, norm {args.norm}, units ATU", origin, edges)
     print(f"wrote {args.output}: {what}, grid {tuple(args.grid)}, range [{data.min():.6g}, {data.max():.6g}]")
 
