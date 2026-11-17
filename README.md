@@ -25,6 +25,11 @@ WIEN2k calculation instead, with the method of Kurasch et al. (2011):
 The Coulomb potential of the superposed free atoms (`x dstart`) goes through
 exactly the same steps and gives the IAM for comparison.
 
+A second route (`src/vcoul2tiff_lapw3.py`, section *Second route* below) builds
+the projected potential from the Fourier coefficients of the same potential
+file instead: no 3D grid, no cutoff, and the beam along any zone axis whose
+projected lattice has a rectangular cell.
+
 ## Scripts
 
 In the order of use:
@@ -40,6 +45,9 @@ In the order of use:
 * `src/vcoul2tiff_ulm.py` — steps 2 to 5 of the method: cutoff, shift,
   projection per layer, conversion to 1/Å. Writes one TIFF per layer, each
   holding one unit cell.
+* `src/vcoul2tiff_lapw3.py` — the second route: Fourier coefficients of
+  `case.vcoul` from WIEN2k's lapw3, summed on the ixchel grid for a chosen zone
+  axis; writes the layer TIFF ready for `ixchel main` and a one-layer cfg.
 * `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
   side, so that it covers the ixchel `dim` grid. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
@@ -266,6 +274,60 @@ until $PY $REPO/src/check_dstart.py C_single; do x dstart; done
 x lapw0 && cp C_single.vcoul C_single.vcoul_start
 $PY $REPO/src/plot_kurasch_fig2.py --vcoul C_single.vcoul_start --struct C_single.struct -o kurasch_fig2_carbon.png
 ```
+
+## Second route: projected potential from Fourier coefficients
+
+`src/vcoul2tiff_lapw3.py` does not sample the potential. WIEN2k's `lapw3`,
+which normally Fourier-transforms the electron density (X-ray structure
+factors), is run on `case.vcoul`; the file has the same form as a density file.
+For a beam along the lattice vector t = [u v w] the projection over one period
+|t| contains only the coefficients with G ⟂ t, and their sum on the ixchel grid
+is the layer:
+
+```bash
+$PY $REPO/src/vcoul2tiff_lapw3.py --struct Graphene.struct --vcoul Graphene.vcoul_DFT \
+    --in2 Graphene.in2 --beam 0 0 1 --ncell 14 8 --dim 1008 1008 -o sim_lapw3
+cd sim_lapw3 && cp ../sim.cfg . && ixchel main -c crystal.cfg -s sim.cfg
+```
+
+The script finds the rectangular image cell itself, runs `lapw3` in a temporary
+directory, and writes `atompota.tif` on the `dim` grid together with
+`crystal.cfg` (one layer of thickness |t|, with the atoms of the image cell).
+It prints the lattice vectors that span the image cell.
+
+What it covers and what not:
+
+* The beam must be a zone axis, and the lattice projected along it must have a
+  rectangular cell; the script stops otherwise.
+* One period along the beam is one slice. For a long period that is a thick
+  slice; thinner slices are not implemented.
+* Lattice types H and P, structures with an inversion centre at the origin.
+* The mean value of the layer is relative to lapw0's zero of the potential, not
+  to the vacuum level as in the cutoff route. The difference is a constant,
+  i.e. a global phase of the wave.
+* The layer is the Fourier sum cut at the Nyquist limit of the grid. It rings
+  around the nuclei and can be negative there; `ixchel main` applies its own
+  band limit to every layer file in the same way.
+* `lapw3` of WIEN2k 24.1 is used unchanged, but for a purpose it was not written
+  for. The checks below are the evidence that it works on a potential file.
+
+Checks (the difference DFT − IAM is smooth, so a plain grid sum is an accurate
+reference for it):
+
+| check | result |
+|---|---|
+| graphene [001], DFT − IAM, against the cutoff route (after removing the constant offset) | largest deviation 1.5e-4 1/Å, rms 5e-6 (range 0.19) |
+| graphene: coefficients of the layer up to 1/d = 2.9 1/Å against the FFT of the cutoff layer | equal to 3e-4 V·Å once a point deficit of 154 V·Å at each nucleus pixel of the cutoff layer is removed (DFT and IAM alike) |
+| graphene: `lapw3` on `vcoul` against the Poisson relation from the density's structure factors | median relative difference 5e-4 |
+| graphene: mean inner potential from the G = 0 coefficient, DFT / IAM | 2.5693 / 3.0505 V, change −15.78 % (cutoff route −15.80 %) |
+| graphene: `ixchel main` on the written cfg and layer; transmission function vs exp(iσV) | 7e-8 rad |
+| graphene: `ixchel atompot` on the written cfg | its atoms sit on the peaks of the layer |
+| rutile [001], DFT − IAM, against a `lapw5grid.py` box summed along the beam | largest deviation 3.3e-4 1/Å, rms 2e-5 (range 0.26) |
+| rutile [110] (image cell 2.958 × 3.248 Å, sheared box) | largest deviation 1.4e-3 1/Å, rms 5e-5 (range 0.38) |
+| rutile [111] (image cell 2.692 × 6.497 Å; no orthogonal box of lattice vectors exists) | largest deviation 1.2e-3 1/Å, rms 1.5e-4 (range 0.41) |
+
+Rutile (P4₂/mnm) has symmetry operations with translations, so these rows also
+test the phase factors between equivalent reflections.
 
 ## Results for graphene
 
