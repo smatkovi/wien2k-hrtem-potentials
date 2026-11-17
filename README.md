@@ -40,9 +40,9 @@ In the order of use:
 * `src/vcoul2tiff_ulm.py` — steps 2 to 5 of the method: cutoff, shift,
   projection per layer, conversion to 1/Å. Writes one TIFF per layer, each
   holding one unit cell.
-* `src/tiff2ixchel.py` — repeats a one-unit-cell layer TIFF NCELL times and
-  resamples it onto the ixchel `dim` grid (Fourier interpolation), with
-  ixchel's cfg checksum. Required before `ixchel main`.
+* `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
+  side, so that it covers the ixchel `dim` grid, and adds ixchel's cfg
+  checksum. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
   page 1 float32 data, page 2 checksums). Imported by the scripts that read or
   write layer files.
@@ -201,9 +201,11 @@ $PY $REPO/analysis/plot_dft_iam_maps.py . graphene_dft_iam_maps.png
 
 Not part of `run_graphene.sh`. `ixchel main` expects every layer file to cover
 the whole supercell on exactly `dim` pixels, so `dim` and `NCELL` are set in
-the crystal cfg first and `tiff2ixchel.py` brings the layer onto that grid.
-With `NCELL = [14, 8, 1]` and `dim = [1008, 1008]` one ixchel pixel is one
-WIEN2k grid point (72 · 14 = 126 · 8 = 1008).
+the crystal cfg first and `tiff2ixchel.py` copies the unit cell `NCELL` times.
+No value is changed: one ixchel pixel is one WIEN2k grid point. The numbers
+have to fit for that, points per unit cell × `NCELL` = `dim`; here
+72 · 14 = 126 · 8 = 1008 with `NCELL = [14, 8, 1]` and `dim = [1008, 1008]`.
+`tiff2ixchel.py` stops if they do not.
 
 ```bash
 cat > sim.cfg <<EOF
@@ -293,7 +295,7 @@ Figs. 2 and 3 are read off the figures.
 | mean inner potential change, DFT vs IAM | −15.80 % (without the cutoff −10.36 %) | 15.5 % |
 | change inside the paper's ring (diameter = bond / 2) around the atoms / outside | −6.69 % / −22.48 % | — (Fig. 6 e gives it for the B/O cells only) |
 | (V_z,DFT − V_z,IAM) / V_z,IAM over the cell | −30.5 … −1.7 % | 10–30 % |
-| `ixchel main` transmission function vs exp(iσV), DFT / IAM | 6e-8 / 6e-8 rad | — |
+| `ixchel main` transmission function vs exp(iσV), DFT / IAM | 6e-8 / 8e-8 rad | — |
 | phase of the layer, DFT − IAM | −0.0111 … −0.0019 rad | — |
 | Fig. 3, centre column without / with the cutoff | 54 781 / 446 V·Å | ≈ 57 000 / ≈ 453 V·Å |
 | Fig. 3, mean of the green line, pixel 1 / pixel 2 | 1671 (green sampled at 3000 points per Å) / 392 V·Å | ≈ 1660 / ≈ 396 V·Å |
@@ -366,10 +368,9 @@ Checks of the tools:
   writes an ixchel cfg only for three perpendicular vectors, and an ixchel
   layer is a rectangle (`ax`, `by`). How to treat cells whose projection along
   the beam is not rectangular is not decided.
-* **Nyquist term.** `tiff2ixchel.py` keeps only frequencies strictly below the
-  Nyquist limit, so the term at the limit is dropped even when the cell fits
-  the ixchel grid exactly (graphene: 2e-4 % of the spectral power). It lies
-  above the 2/3 band limit that `ixchel main` applies anyway.
+* **The grids have to fit.** `tiff2ixchel.py` only copies; it does not
+  resample. The grid of `lapw5grid.py`, `NCELL` and `dim` must be chosen so
+  that the points per unit cell times `NCELL` give `dim` in both directions.
 * **Paper values of Fig. 3** in the table above are read off the figure by
   eye.
 * **Other systems of the paper** (B and O substitution, O adatom) are not
