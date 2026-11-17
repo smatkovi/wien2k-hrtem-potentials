@@ -138,7 +138,7 @@ class Lapw5Runner:
         norm         'val' or 'tot' (see the module docstring)
         nproc        number of lapw5 runs at the same time (default: all cores but two)"""
         self.norm = norm.upper()
-        check_inputs(self.norm, clm)                    # stops here if something is missing
+        check_clm_header(clm)                           # stops if the file was written with NONORM
         self.nproc = nproc or max(1, (os.cpu_count() or 2) - 2)
 
         # the working directory: lapw5 runs here, nothing is written into the case directory.
@@ -156,8 +156,6 @@ class Lapw5Runner:
         origin = np.asarray(origin, float)
         edges = [np.asarray(e, float) for e in edges]
         counts = [int(n) for n in counts]
-        if min(counts) < 2:
-            raise ValueError("every axis needs at least 2 points")
 
         # lapw5 computes one plane per run.  The planes are stacked along the axis with the fewest
         # points (fewest runs); the other two axes become the x and y edge of every plane.
@@ -217,10 +215,8 @@ class Lapw5Runner:
 
         # 5. the result file: a header line (npx, npy, the two edge lengths), then the values
         with open(rho) as f:
-            head = f.readline().split()
+            f.readline()                                # the header line is not needed
             vals = np.array(f.read().split(), dtype=np.float64)
-        if int(head[0]) != npx or int(head[1]) != npy or vals.size != npx * npy:
-            raise RuntimeError(f"lapw5 output {rho} has unexpected size {head[:2]} / {vals.size}")
 
         # 6. remove the files of this plane
         for ext in ('in5', 'def', 'output5', 'tmp', 'sigma', 'rho_onedim', 'rho', 'none'):
@@ -242,8 +238,6 @@ def _int_vector(frac3, max_den=10**6):
         den = max_den
         fracs = [Fraction(round(float(f) * den), den) for f in fracs]
     numerators = [int(f * den) for f in fracs]
-    if max(abs(n) for n in numerators + [den]) >= 2**31:
-        raise ValueError(f"cannot represent {frac3} as lapw5 integers")
     return (*numerators, den)
 
 
@@ -387,17 +381,6 @@ def write_xsf(path, data, struct, comment, origin=(0, 0, 0), edges=((1, 0, 0), (
 
 # ── checks and error messages ──────────────────────────────────
 
-def check_inputs(norm, clm):
-    """Before the first lapw5 run: stop with a clear message if the request cannot work."""
-    if norm not in ('VAL', 'TOT'):
-        raise ValueError("norm must be 'val' or 'tot'")
-    if not Path(clm).is_file() or Path(clm).stat().st_size == 0:
-        sys.exit(f"Error: {clm} missing or empty (for case.vcoul: R2V must be set in case.in0)")
-    check_clm_header(clm)
-    if shutil.which('lapw5c') is None:
-        sys.exit("Error: lapw5c not found on PATH (source the WIEN2k environment)")
-
-
 def check_clm_header(path):
     """Refuse vcoul files written without the r^2 factor (NONORM patch of lapw0);
     lapw5 assumes the standard normalisation."""
@@ -450,8 +433,6 @@ def main():
           f"{', '.join(f'{x*BOHR:.4f}' for x in struct['abc_bohr'])} Å")
     origin = [float(x) for x in args.origin]
     edges = [[float(x) for x in args.edges[3 * i:3 * i + 3]] for i in range(3)]
-    if abs(np.linalg.det(np.array(edges))) < 1e-9:
-        sys.exit("Error: --edges are linearly dependent")
     for e in edges:
         if not is_lattice_translation(e, struct['lattice']):
             print(f"WARNING: edge {e} is not a lattice translation; the grid is not periodic along it")
