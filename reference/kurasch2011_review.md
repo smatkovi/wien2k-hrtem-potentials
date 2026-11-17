@@ -74,8 +74,7 @@ Fig. 3 legend: "nn cutoff 50000".
   with the largest V_s, i.e. the *most negative* V_C, which is the neighbour
   closest to the nucleus. The original code applied `maximum_filter` to
   WIEN2k-sign data and so picked the *least* negative neighbour. Fixed:
-  `--nn-value highest` (default) implements the paper, `--nn-value lowest`
-  keeps the old reading.
+  `apply_nn_cutoff()` takes the most negative V_C among the neighbours.
 * For a nucleus on a voxel of the nearly isotropic 30 ppÅ grid the face
   neighbours are almost, but not exactly, equal (grid spacings 33.3/33.8/33.3
   mÅ), so the two readings give nearly the same central pixel (446 vs
@@ -85,15 +84,16 @@ Fig. 3 legend: "nn cutoff 50000".
 ## 2. Neighbourhood
 
 The paper does not specify the stencil ("neighboring pixels", legend "nn").
-The default is the **6 face neighbours**, the literal nearest neighbours on
+The script uses the **6 face neighbours**, the literal nearest neighbours on
 the grid. With the paper's reading of "highest", the 20 edge and corner
 voxels of a 3×3×3 cube rarely win because they are farther from the nucleus.
-With `--nn-value lowest`, the 26-stencil picks a corner voxel and lowers the
-central pixel by a further 8 % (410 vs 444 V·Å). `--stencil 26` is available.
-When a flagged voxel has no valid neighbour at all (a cluster), only that voxel
-searches a wider cube. The cutoff runs on the periodic grid after the
-duplicated XSF end planes have been removed (§3), so `mode='wrap'` reaches the
-true periodic neighbour.
+(With the other reading, lowest V_s, a 26-point neighbourhood picks a corner
+voxel and lowers the central pixel by a further 8 %: 410 vs 444 V·Å.)
+A neighbour that is itself beyond the cutoff does not count; a flagged voxel
+without any valid face neighbour keeps its value and the script prints a
+warning. The cutoff runs on the periodic grid after the duplicated XSF end
+planes have been removed (§3), so the neighbour of a border voxel is taken
+from the opposite side of the cell.
 
 ## 3. Sampling rate and layer boundaries
 
@@ -287,9 +287,8 @@ inclined bond centre.
 
 ## 9. Summary of changes to `src/vcoul2tiff_ulm.py`
 
-1. `apply_nn_cutoff()`: replacement value = neighbour with the highest V_s;
-   6-face stencil by default (`--nn-value`, `--stencil`); only voxels without
-   any valid stencil neighbour use the widened cube.
+1. `apply_nn_cutoff()`: replacement value = neighbour with the highest V_s
+   among the 6 face neighbours; neighbours beyond the cutoff do not count.
 2. Paper normalisation (subtract max V_C so that min V_s = 0); `--no-normalize`.
 3. Duplicated XSF end planes removed on all axes before cutoff, normalisation
    and projection.

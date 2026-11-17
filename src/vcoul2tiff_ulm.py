@@ -31,7 +31,7 @@ Sign convention:
   the cutoff as "-50 kV", i.e. in WIEN2k sign.  "Higher than the cutoff" thus
   means V_C < -50 kV (larger magnitude) and "highest value in the neighboring
   pixels" means the neighbour with the largest V_s, i.e. the most negative V_C.
-  See apply_nn_cutoff() for the two readings and their consequences.
+  apply_nn_cutoff() implements this reading.
 
 XSF conventions (3ddens general grid, also written by lapw5grid.py):
   General grid: n points span 0..L inclusive, the last plane is the periodic
@@ -63,8 +63,7 @@ Usage:
         --xsf Graphene_vcoul_DFT.xsf \\
         --cfg Graphene_ixchel_001.cfg \\
         --miller 0 0 1 \\
-        [--cutoff 50000] [--stencil 6|26] [--nn-value highest|lowest] \\
-        [--no-normalize] [--order auto|F|C] [-o wien2k_ulm_001]
+        [--cutoff 50000] [--no-normalize] [--order auto|F|C] [-o wien2k_ulm_001]
 
 Arguments and where they come from:
     --xsf        the Coulomb potential on a 3D grid: the -o file of lapw5grid.py
@@ -80,16 +79,12 @@ Arguments and where they come from:
                  1 0 0 and 0 1 0 (default 0 0 1)
     --cutoff     magnitude of the cutoff in volt (default 50000 = the paper's
                  -50 kV); see step 2
-    --stencil    which neighbours supply the replacement value: the 6 face
-                 neighbours (default) or all 26
-    --nn-value   highest (paper, default) or lowest scattering potential among the
-                 neighbours
     --no-normalize  skip step 3 (smallest V_s set to zero)
     --order      data order of the XSF (default auto; F = x fastest, C = z fastest)
     -o           output directory (default wien2k_ulm); one TIFF per layer, named
                  as in the cfg.  It is the -i input of tiff2ixchel.py.
 
-Dependencies: numpy, scipy, tifffile
+Dependencies: numpy, tifffile
 """
 
 import argparse
@@ -98,7 +93,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import maximum_filter, minimum_filter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ixchel_tiff import write_ixchel_tiff       # noqa: E402
@@ -121,90 +115,48 @@ RY_TO_V   = 13.605693122994  # 1 Ry = 13.606 eV -> potential of an electron: 13.
 H2_2PI_ME = 47.88            # h²/(2π m_e e) [V·Å²]  (Kirkland/ixchel unit of V_z)
 
 
-def _footprint(stencil, size):
-    """Neighbourhood used to pick the replacement value.
-    size == 3: 6 face neighbours (stencil=6) or the full 3x3x3 cube (stencil=26).
-    size  > 3: growing cube, only used for flagged voxels that have no valid
-               neighbour in the requested stencil (cluster of flagged voxels)."""
-    if stencil == 26 or size > 3:
-        return np.ones((size, size, size), dtype=bool)
-    fp = np.zeros((3, 3, 3), dtype=bool)
-    fp[1, 1, :] = fp[1, :, 1] = fp[:, 1, 1] = True
-    return fp
-
-
-def apply_nn_cutoff(data_3d, cutoff_ry, stencil=6, nn_value='highest'):
+def apply_nn_cutoff(data_3d, cutoff_ry):
     """
-    Replace voxels beyond the cutoff by a value taken from their neighbours.
+    Step 2: replace the grid points beyond the cutoff by the value of a neighbour.
 
     Paper (p. 397): "Whenever a value in the 3D potential is higher than some
     cutoff value, we change this value to the highest value in the neighboring
-    pixels."  This is a replacement, not a clamp: the flagged voxel takes a
-    neighbour's value, the threshold itself never appears in the data.
+    pixels."  The point takes a neighbour's value; the cutoff itself never
+    appears in the data.
 
-    Flagging.  data_3d is in WIEN2k sign (V_C < 0 at the nuclei) and the paper
-    quotes its cutoff as "-50 kV", so "higher than the cutoff" is read as
-    larger in magnitude:  flagged  <=>  V_C < -cutoff_ry.
+    Which points.  data_3d is in WIEN2k sign (V_C < 0 at the nuclei) and the
+    paper quotes its cutoff as "-50 kV", so "higher than the cutoff" means
+    larger in magnitude: a point is replaced if V_C < -cutoff_ry.
 
-    Replacement value ("highest value in the neighboring pixels"):
-      nn_value='highest' (default, the paper's reading): the neighbour with the
-        highest scattering potential V_s = -V_C, i.e. the most negative V_C —
-        the neighbour closest to the nucleus.  The flagged voxel becomes a
-        plateau at the level of its nearest neighbour.
-      nn_value='lowest': the least negative neighbour (what a maximum_filter on
-        WIEN2k-sign data gives; behaviour of earlier versions of this script).
-        This carves a dip into the potential at the nucleus and is kept only
-        for comparison.
-    For a nucleus sitting exactly on a grid point of an isotropic grid all face
-    neighbours are equal by symmetry and the two readings coincide; they differ
-    for off-grid nuclei, anisotropic voxels and clusters of flagged voxels.
+    Which value.  The paper's "highest value" refers to the scattering potential
+    V_s = -V_C, so it is the most negative V_C among the neighbours: the value of
+    the neighbour closest to the nucleus.
 
-    Neighbourhood.  The paper says "neighboring pixels" without a stencil.
-    Default is the 6 face neighbours (the literal nearest neighbours; with
-    nn_value='highest' the 20 edge/corner voxels of a 3x3x3 cube can hardly
-    win anyway because they are farther from the nucleus); stencil=26 uses the
-    full cube.  Periodic boundaries (mode='wrap') because the cell is periodic;
-    data_3d must therefore be the periodic grid without the duplicated XSF end
-    planes (drop_periodic_duplicates), otherwise a boundary voxel would see its
-    own flagged copy instead of its true neighbour.
+    Which neighbours.  The six points one grid step away along x, y and z.  The
+    cell is periodic, so a point on the border has its neighbour on the opposite
+    side (the % in the code); data_3d must therefore be the periodic grid without
+    the duplicated XSF end planes (drop_periodic_duplicates).  A neighbour that
+    is itself beyond the cutoff does not count.  A point with no neighbour left
+    keeps its value and is reported.
 
-    Clusters.  Only voxels below the threshold are ever changed, and replacement
-    values are always taken from unflagged voxels.  A flagged voxel with a valid
-    neighbour in the requested stencil takes its value from that stencil; only
-    flagged voxels without any valid stencil neighbour (all flagged) search a
-    cube that grows shell by shell until it contains an unflagged voxel.
-
-    Returns (data, n_replaced) with n_replaced the number of voxels actually
-    replaced.
+    Returns (data, n_replaced) with n_replaced the number of points replaced.
     """
     data = data_3d.copy()
-    flagged = data < -cutoff_ry
-    if not flagged.any():
-        return data, 0
-
-    # mask flagged voxels with +/-inf so the rank filter ignores them
-    if nn_value == 'highest':
-        rank_filter, masked = minimum_filter, np.where(flagged, np.inf, data)
-    else:
-        rank_filter, masked = maximum_filter, np.where(flagged, -np.inf, data)
-
-    todo = flagged.copy()                   # flagged voxels that still wait for a value
-    size = 3
-    for _ in range(20):
-        # nb: for every voxel the best unflagged value in its neighbourhood (+/-inf if there is none)
-        nb  = rank_filter(masked, footprint=_footprint(stencil, size), mode='wrap')
-        got = todo & np.isfinite(nb)        # waiting voxels that have found a value in this round
-        data[got] = nb[got]
-        todo &= ~got
-        if not todo.any():
-            break
-        size += 2       # cluster of flagged voxels -> widen the search for the rest
-
-    remaining = int(todo.sum())
-    if remaining > 0:
-        print(f"    WARNING: {remaining} voxels still below -cutoff "
-              f"(no unflagged voxel within a {size - 2}^3 cube)")
-    return data, int(flagged.sum()) - remaining
+    nx, ny, nz = data_3d.shape
+    n_replaced = n_left = 0
+    for i, j, k in np.argwhere(data_3d < -cutoff_ry):                # the points beyond the cutoff
+        neighbours = [data_3d[(i - 1) % nx, j, k], data_3d[(i + 1) % nx, j, k],
+                      data_3d[i, (j - 1) % ny, k], data_3d[i, (j + 1) % ny, k],
+                      data_3d[i, j, (k - 1) % nz], data_3d[i, j, (k + 1) % nz]]
+        neighbours = [v for v in neighbours if v >= -cutoff_ry]      # a neighbour beyond the cutoff does not count
+        if neighbours:
+            data[i, j, k] = min(neighbours)                          # most negative V_C = highest V_s
+            n_replaced += 1
+        else:
+            n_left += 1
+    if n_left:
+        print(f"    WARNING: {n_left} points beyond the cutoff have no neighbour within it and keep their value")
+    return data, n_replaced
 
 
 def normalise(data_cut):
@@ -471,11 +423,6 @@ def main():
     ap.add_argument('--cutoff', type=float, default=50000,
                     help='cutoff magnitude in volt, the sign is ignored: voxels with '
                          'V_C < -|cutoff| are replaced (default: 50000, paper: -50 kV)')
-    ap.add_argument('--stencil', type=int, choices=[6, 26], default=6,
-                    help='neighbourhood for the replacement value (default: 6 face neighbours)')
-    ap.add_argument('--nn-value', choices=['highest', 'lowest'], default='highest',
-                    help="'highest' scattering potential among the neighbours (paper) "
-                         "or 'lowest' (earlier behaviour); see apply_nn_cutoff()")
     ap.add_argument('--no-normalize', action='store_true',
                     help='skip the paper normalisation (smallest V_s set to zero)')
     ap.add_argument('-o', '--output', default='wien2k_ulm', help='output directory')
@@ -502,13 +449,12 @@ def main():
           f" = [{data_3d.min()*RY_TO_V:.0f}, {data_3d.max()*RY_TO_V:.2f}] V")
 
     # -- 2. nearest-neighbour cutoff ---------------------------------
-    print(f"\n[2] nearest-neighbour cutoff at -{cutoff_V:.0f} V = -{cutoff_Ry:.1f} Ry "
-          f"(stencil {args.stencil}, nn-value {args.nn_value})")
+    print(f"\n[2] nearest-neighbour cutoff at -{cutoff_V:.0f} V = -{cutoff_Ry:.1f} Ry (6 neighbours)")
     if args.cutoff < 0:
         print(f"    (--cutoff {args.cutoff:.0f} taken as magnitude {cutoff_V:.0f} V)")
     n_over = int((data_3d < -cutoff_Ry).sum())
     print(f"    voxels below -cutoff: {n_over} of {data_3d.size} ({100*n_over/data_3d.size:.4f}%)")
-    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry, args.stencil, args.nn_value)
+    data_cut, n_replaced = apply_nn_cutoff(data_3d, cutoff_Ry)
     print(f"    replaced:  {n_replaced} voxels")
     print(f"    V_C (after cutoff): [{data_cut.min()*RY_TO_V:.0f}, {data_cut.max()*RY_TO_V:.2f}] V")
 

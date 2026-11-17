@@ -48,7 +48,7 @@ for k in ('DFT', 'IAM'):
     data = ulm.drop_periodic_duplicates(data)                    # periodic grid
     nz = data.shape[2]
     dz = cz / nz
-    cut, nrep = ulm.apply_nn_cutoff(data, CUTOFF_RY, 6, 'highest')
+    cut, nrep = ulm.apply_nn_cutoff(data, CUTOFF_RY)
     # mean inner potential = mean of V_s over the cell, with V_s = largest V_C (the vacuum level) - V_C
     mip_raw = ((data.max() - data) * RY_TO_V).mean()             # [V], no cutoff
     mip_cut = ((cut.max() - cut) * RY_TO_V).mean()               # [V], with cutoff
