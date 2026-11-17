@@ -48,13 +48,10 @@ In the order of use:
   write layer files.
 * `src/check_transmission.py` — checks ixchel's transmission function
   `trans_<label>.tif` against exp(iσV) of the layer potential.
-* `analysis/mip_compare.py` — mean inner potential, DFT vs IAM, with and
-  without the cutoff; flatness of the vacuum potential.
+* `analysis/mip_compare.py` — mean inner potential, DFT vs IAM.
 * `analysis/plot_dft_iam_maps.py` — maps of the projected DFT and IAM
   potential, their difference and the integrated changes, in the style of the
   paper's Fig. 6.
-* `analysis/sym_check.py` — density and projected potential at two bond
-  centres (three-fold symmetry of the SCF).
 * `src/plot_kurasch_fig2.py`, `src/plot_kurasch_fig3.py` — Figs. 2 and 3 of the
   paper with the paper's definitions, plus Doyle–Turner and Kirkland curves.
 
@@ -132,11 +129,9 @@ eighth decimal of some translations; total energy and figure are the same.
 echo F > inlebreduce                                   # local lapw0 build: no Lebedev-point reduction
 init_lapw -b -rkmax 7.0 -numk 200 -vxc 13
 sed -i '2s/^NR2V/R2V /' Graphene.in0                   # lapw0 shall write Graphene.vcoul
-until $PY $REPO/src/check_dstart.py Graphene; do x dstart; done
 ```
 
-`-numk 200` gives an 11 × 11 × 1 mesh (16 k-points), `-vxc 13` is PBE. The
-`until` line repeats `x dstart` until the check passes (see *Pitfalls*).
+`-numk 200` gives an 11 × 11 × 1 mesh (16 k-points), `-vxc 13` is PBE.
 
 ### 2. SCF and the Coulomb potential of the converged density (DFT)
 
@@ -150,7 +145,8 @@ cp Graphene.clmsum Graphene.clmsum_scf_backup
 ### 3. The same for superposed free atoms (IAM)
 
 `x dstart` overwrites `Graphene.clmsum` with the atomic densities and `x lapw0`
-gives their Coulomb potential. Afterwards the SCF files are put back.
+gives their Coulomb potential. The `until` line repeats `x dstart` until the
+check passes (see *Pitfalls*). Afterwards the SCF files are put back.
 
 ```bash
 x dstart
@@ -205,7 +201,7 @@ the crystal cfg first and `tiff2ixchel.py` copies the unit cell `NCELL` times.
 No value is changed: one ixchel pixel is one WIEN2k grid point. The numbers
 have to fit for that, points per unit cell × `NCELL` = `dim`; here
 72 · 14 = 126 · 8 = 1008 with `NCELL = [14, 8, 1]` and `dim = [1008, 1008]`.
-`tiff2ixchel.py` stops if they do not.
+If they do not fit, `ixchel main` stops with "Dimension mismatch".
 
 ```bash
 cat > sim.cfg <<EOF
@@ -268,15 +264,6 @@ x lapw0 && cp C_single.vcoul C_single.vcoul_start
 $PY $REPO/src/plot_kurasch_fig2.py --vcoul C_single.vcoul_start --struct C_single.struct -o kurasch_fig2_carbon.png
 ```
 
-### Symmetry check
-
-The two bond centres (1/2, 0) and (1/2, 1/2) of the hexagonal cell are
-symmetry equivalent, so density and projected potential must agree there:
-
-```bash
-$PY $REPO/analysis/sym_check.py . Graphene.clmsum Graphene.vcoul_DFT --p1 1/2 0 --p2 1/2 1/2
-```
-
 ## Results for graphene
 
 Hexagonal cell P6/mmm, a = 2.461 Å, 15 Å cell height, PBE, RKmax 7,
@@ -287,12 +274,10 @@ Figs. 2 and 3 are read off the figures.
 | check | result | paper |
 |---|---|---|
 | SCF total energy | −152.41591 Ry | SI File 1: −152.4134 … −152.4152 Ry |
-| density / V_z at the two bond centres | equal (symmetry equivalent in P6/mmm) | equal (hexagonal) |
-| vacuum: plane-averaged potential at z = 7.5 Å and 1 Å above and below, DFT / IAM | constant to 1e-5 V / 1e-5 V | — |
 | nucleus grid points replaced by the cutoff, DFT / IAM | 4 / 4 | — |
 | range of V_z in the layer, DFT / IAM | 6.75 … 445.71 / 8.66 … 453.45 V·Å | — |
 | mean inner potential, DFT / IAM | 2.5647 / 3.0460 V | — |
-| mean inner potential change, DFT vs IAM | −15.80 % (without the cutoff −10.36 %) | 15.5 % |
+| mean inner potential change, DFT vs IAM | −15.80 % | 15.5 % |
 | change inside the paper's ring (diameter = bond / 2) around the atoms / outside | −6.69 % / −22.48 % | — (Fig. 6 e gives it for the B/O cells only) |
 | (V_z,DFT − V_z,IAM) / V_z,IAM over the cell | −30.5 … −1.7 % | 10–30 % |
 | `ixchel main` transmission function vs exp(iσV), DFT / IAM | 6e-8 / 8e-8 rad | — |
@@ -322,11 +307,14 @@ Checks of the tools:
   `SRC_dstart/dstart.F` but never initialised (`init.F` only ever sets it to
   `.true.`), so a run can take the tau/potential path by accident: no density
   smoothing, no renormalisation, a charged IAM density (graphene: 12.027
-  instead of 12 electrons, sloped vacuum potential). Check every run with
-  `check_dstart.py` and repeat `x dstart` until it passes. If the check reports
-  `ZZ != Z`, `case.rsp` was made for another RMT: run `x lstart` first. The
-  permanent fix would be `tau_mode=.false.` in `init.F` (not applied: the
-  WIEN2k tree is left untouched).
+  instead of 12 electrons, sloped vacuum potential). Check every run whose
+  density is used directly (the IAM potential, the starting potential of
+  Fig. 2) with `check_dstart.py` and repeat `x dstart` until it passes. The
+  starting density of an SCF needs no check: from a failed start the graphene
+  SCF converges in the same 10 cycles to the same energy within 4e-8 Ry. If
+  the check reports `ZZ != Z`, `case.rsp` was made for another RMT: run
+  `x lstart` first. The permanent fix would be `tau_mode=.false.` in `init.F`
+  (not applied: the WIEN2k tree is left untouched).
 * **Lebedev-point reduction of the local lapw0 build.** It is on by default
   and assumes local mirror planes at every non-cubic site, which distorts the
   density of sites without them. Put a file `inlebreduce` containing `F` into

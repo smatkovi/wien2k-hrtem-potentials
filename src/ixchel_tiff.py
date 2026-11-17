@@ -21,7 +21,6 @@ This module is imported by the scripts that read or write such files
 Dependencies: numpy, tifffile
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -29,12 +28,8 @@ import tifffile
 
 
 def read_ixchel_tiff(path):
-    """The data page of an ixchel TIFF (its first 2D float32 page) as float64, shape [ny, nx]."""
-    with tifffile.TiffFile(str(path)) as tif:
-        for page in tif.pages:
-            if page.dtype == np.float32 and page.ndim == 2:
-                return page.asarray().astype(np.float64)
-    sys.exit(f"Error: no float32 data page in {path}")
+    """The data page of an ixchel TIFF (page 1, float32) as float64, shape [ny, nx]."""
+    return tifffile.imread(str(path), key=1).astype(np.float64)
 
 
 def write_ixchel_tiff(filename, data_yx, cksum_cry=0):

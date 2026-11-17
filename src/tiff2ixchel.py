@@ -14,8 +14,9 @@ fit,
 
     dim = NCELL x (points per unit cell),    graphene: 1008 = 14 x 72 = 8 x 126
 
-and the script stops if they do not.  Choose the grid of lapw5grid.py
-(--grid N+1 for N points per unit cell), NCELL and dim accordingly.
+Choose the grid of lapw5grid.py (--grid N+1 for N points per unit cell), NCELL
+and dim accordingly.  If they do not fit, the output has the wrong size and
+`ixchel main` stops with "Dimension mismatch".
 Pixel (0, 0) stays at the unit-cell origin, as in ixchel's own atompot.
 
 Page 2 of the output carries the POSIX cksum of the crystal-structure cfg,
@@ -68,8 +69,6 @@ def parse_cfg(cfg_path):
         return (int(m.group(1)), int(m.group(2))) if m else None
 
     dim = pair('dim')
-    if dim is None:
-        sys.exit(f"Error: no 'dim' in {cfg_path} (ixchel main needs dim)")
     ncell = pair('NCELL') or (1, 1)
 
     # the entries 'filename = "atompota.tif";' of the layers: every name once, in the order of the file
@@ -105,24 +104,12 @@ def main():
         sys.exit("Error: input and output directory must differ")
 
     for fn in filenames:
-        src = Path(args.input) / fn
-        if not src.exists():
-            print(f"  {fn}: missing in {args.input}, skipped")
-            continue
-        uc = read_ixchel_tiff(src)                      # one unit cell, rows = y, columns = x
-        ny, nx = uc.shape
-
-        # the copies must fill the ixchel grid exactly
-        if (nx * ncell[0], ny * ncell[1]) != dim:
-            sys.exit(f"Error: {fn}: {nx} x {ny} points per unit cell times NCELL = {ncell[0]} x {ncell[1]} "
-                     f"gives {nx * ncell[0]} x {ny * ncell[1]} pixels, but dim = {dim[0]} x {dim[1]}.\n"
-                     f"  Choose the lapw5grid.py grid, NCELL and dim so that points x NCELL = dim.")
-
+        uc = read_ixchel_tiff(Path(args.input) / fn)    # one unit cell, rows = y, columns = x
         out = np.tile(uc, (ncell[1], ncell[0]))         # NCELL_y copies downwards, NCELL_x copies across
         dst = Path(args.output) / fn
         write_ixchel_tiff(dst, out, cksum)
-        print(f"  {fn}: unit cell {nx} x {ny} px, {ncell[0]} x {ncell[1]} copies -> {dim[0]} x {dim[1]} px, "
-              f"range [{out.min():.4g}, {out.max():.4g}] 1/Å  -> {dst}")
+        print(f"  {fn}: unit cell {uc.shape[1]} x {uc.shape[0]} px, {ncell[0]} x {ncell[1]} copies -> "
+              f"{out.shape[1]} x {out.shape[0]} px, range [{out.min():.4g}, {out.max():.4g}] 1/Å  -> {dst}")
 
 
 if __name__ == '__main__':
