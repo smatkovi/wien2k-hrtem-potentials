@@ -34,7 +34,6 @@ fi
 echo F > inlebreduce                                   # local lapw0 build: no Lebedev-point reduction
 init_lapw -b -rkmax 7.0 -numk 200 -vxc 13
 sed -i '2s/^NR2V/R2V /' Graphene.in0                   # lapw0 shall write Graphene.vcoul
-until $PY $REPO/src/check_dstart.py Graphene; do x dstart; done
 
 # 2: SCF, then the Coulomb potential of the converged density (DFT)
 run_lapw -ec 0.000001 -cc 0.00001
@@ -42,7 +41,8 @@ x lapw0
 cp Graphene.vcoul Graphene.vcoul_DFT
 cp Graphene.clmsum Graphene.clmsum_scf_backup
 
-# 3: the same for superposed free atoms (IAM), then put the SCF files back
+# 3: the same for superposed free atoms (IAM), then put the SCF files back.
+#    x dstart of WIEN2k 24.1 fails at random; it is repeated until the check passes.
 x dstart
 until $PY $REPO/src/check_dstart.py Graphene; do x dstart; done
 x lapw0

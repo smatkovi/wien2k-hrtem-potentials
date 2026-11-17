@@ -6,65 +6,37 @@ Kurasch et al. (2011), p. 400: "For ideal graphene we find a difference in the
 mean inner potential of 15.5%."  Both potentials go through identical
 processing (30 ppÅ grid, nn cutoff, shift so that min V_s = 0, projection),
 so the mean of the projected potential over the cell is the mean inner
-potential times the layer thickness.
+potential times the thickness of the cell.
 
-Prints
-  * mean V_z of the vcoul2tiff_ulm.py TIFFs (DFT, IAM) and the relative change
-  * the same from the 3D grids with and without the cutoff (effect of the
-    four nucleus voxels on the mean)
-  * vacuum flatness: plane-averaged V_C at z = c/2 and z = c/2 +- 1 Å
+Prints the mean projected potential of the two layer files, the mean inner
+potential that follows from it, and the relative change DFT vs IAM.
 
 Usage:
     python3 mip_compare.py <casedir>
 
 Argument and where it comes from:
     <casedir>    the run directory of the Kurasch route (default: the current
-                 directory).  Read from it, for K = DFT and IAM:
-                   Graphene_vcoul_<K>_ongrid.xsf   written by lapw5grid.py
-                   ulm_<K>_001/atompota.tif        written by vcoul2tiff_ulm.py
+                 directory).  Read from it:
+                   Graphene_ixchel_001.cfg         the crystruct cfg (thickness of the cell)
+                   ulm_DFT_001/atompota.tif        written by vcoul2tiff_ulm.py
+                   ulm_IAM_001/atompota.tif        (the same from case.vcoul_IAM)
 """
 import sys
 from pathlib import Path
 
-import numpy as np
-import tifffile
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
-import vcoul2tiff_ulm as ulm   # noqa: E402
+from ixchel_tiff import read_ixchel_tiff        # noqa: E402
+from vcoul2tiff_ulm import H2_2PI_ME, parse_cfg  # noqa: E402
 
-RY_TO_V = ulm.RY_TO_V
-H2 = ulm.H2_2PI_ME             # 47.88 V*Å²
-CUTOFF_RY = 50000.0 / RY_TO_V
+casedir = Path(sys.argv[1] if len(sys.argv) > 1 else '.')
+thickness = parse_cfg(casedir / 'Graphene_ixchel_001.cfg')['total_z']      # of the cell along the beam [Å]
 
-d = Path(sys.argv[1] if len(sys.argv) > 1 else '.')
+mip = {}
+for kind in ('DFT', 'IAM'):
+    v_z = read_ixchel_tiff(casedir / f'ulm_{kind}_001' / 'atompota.tif')   # projected potential of one cell [1/Å]
+    mean_vz = v_z.mean() * H2_2PI_ME                                       # its mean [V·Å]
+    mip[kind] = mean_vz / thickness                                        # mean potential of the cell [V]
+    print(f"{kind}: mean V_z = {v_z.mean():.5f} 1/Å = {mean_vz:.3f} V*Å -> mean inner potential {mip[kind]:.4f} V")
 
-res = {}
-for k in ('DFT', 'IAM'):
-    # (1) the projected potential that vcoul2tiff_ulm.py wrote
-    # ixchel TIFF: page 0 RGB preview, page 1 float32 data [1/Å], page 2 metadata
-    tif = tifffile.imread(d / f'ulm_{k}_001' / 'atompota.tif', key=1).astype(np.float64)
-    # (2) the 3D grid it was made from, once more with and once without the cutoff
-    data, (_, _, cz) = ulm.read_xsf(d / f'Graphene_vcoul_{k}_ongrid.xsf')
-    data = ulm.drop_periodic_duplicates(data)                    # periodic grid
-    nz = data.shape[2]
-    dz = cz / nz
-    cut, nrep = ulm.apply_nn_cutoff(data, CUTOFF_RY)
-    # mean inner potential = mean of V_s over the cell, with V_s = largest V_C (the vacuum level) - V_C
-    mip_raw = ((data.max() - data) * RY_TO_V).mean()             # [V], no cutoff
-    mip_cut = ((cut.max() - cut) * RY_TO_V).mean()               # [V], with cutoff
-    # (3) is the vacuum flat?  V_C averaged over the planes 1 Å below, at and 1 Å above mid-vacuum
-    plane_mean = data.mean(axis=(0, 1)) * RY_TO_V                # [V] vs z
-    izs = [nz // 2 - int(round(1.0 / dz)), nz // 2, nz // 2 + int(round(1.0 / dz))]
-    res[k] = dict(tif=tif.mean() * H2 / cz, raw=mip_raw, cut=mip_cut)   # TIFF: mean V_z / thickness
-    print(f"{k}: TIFF mean V_z = {tif.mean():.5f} 1/Å = {tif.mean() * H2:.3f} V*Å -> MIP {res[k]['tif']:.4f} V;"
-          f"  3D grid: MIP {mip_cut:.4f} V with cutoff ({nrep} voxels), {mip_raw:.4f} V without")
-    print(f"     vacuum: plane-averaged V_C at z = " +
-          ", ".join(f"{iz * dz:.2f} Å: {plane_mean[iz]:.5f} V" for iz in izs) +
-          f";  max V_C {data.max() * RY_TO_V:.5f} V")
-
-dft, iam = res['DFT'], res['IAM']
-print()
-for key, what in (('tif', 'TIFFs (cutoff, normalised, projected)'),
-                  ('cut', '3D grid with cutoff'), ('raw', '3D grid without cutoff')):
-    print(f"MIP change DFT vs IAM, {what:38s}: {(dft[key] / iam[key] - 1) * 100:+.2f} %")
-print("paper (p. 400): 15.5 %")
+print(f"change of the mean inner potential, DFT vs IAM: {(mip['DFT'] / mip['IAM'] - 1) * 100:+.2f} %   "
+      f"(paper, p. 400: 15.5 %)")
