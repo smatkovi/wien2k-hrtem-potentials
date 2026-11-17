@@ -254,8 +254,6 @@ def read_xsf(path): #step 1 in order of execution
     for i, ln in enumerate(lines):                  # find line i, the one that opens the data grid
         if 'DATAGRID_3D' in ln and 'BEGIN_BLOCK' not in ln and 'END' not in ln:
             break
-    else:
-        sys.exit("Error: no DATAGRID_3D block found in XSF.")
 
     nx, ny, nz = map(int, lines[i + 1].split())
     va = np.array(list(map(float, lines[i + 3].split())))
@@ -267,8 +265,6 @@ def read_xsf(path): #step 1 in order of execution
         if len(vals) >= nx * ny * nz or 'END_DATAGRID' in ln:
             break
         vals.extend(float(x) for x in ln.split())
-    if len(vals) < nx * ny * nz:
-        sys.exit(f"Error: too few data points ({len(vals)} < {nx*ny*nz}).")
 
     # the list of numbers as an array [nx, ny, nz]; order='F': the first index (x) runs fastest in the file
     data = np.array(vals[:nx * ny * nz]).reshape((nx, ny, nz), order='F')
@@ -314,8 +310,6 @@ def parse_cfg(cfg_path):
     #         b = { ... };
     #     };
     stack_match = re.search(r'stack_seq\s*=\s*\"\d+\(([^)]+)\)\"', text)
-    if not stack_match:
-        sys.exit("Error: stack_seq not found in cfg.")
 
     # Every layer starts with a line "<letter> = {"; its text runs up to the start of the next layer.
     starts = list(re.finditer(r'^\s*([a-z])\s*=\s*\{', text, re.MULTILINE))
@@ -332,8 +326,6 @@ def parse_cfg(cfg_path):
     layers = []
     z0 = 0.0
     for label in stack_match.group(1):              # the stacking sequence, one letter per layer
-        if label not in layer_defs:
-            sys.exit(f"Error: layer '{label}' not defined in the cfg.")
         ld = layer_defs[label]
         layers.append({'label': label, 'cz': ld['cz'], 'z0': z0, 'filename': ld['filename']})
         z0 += ld['cz']
