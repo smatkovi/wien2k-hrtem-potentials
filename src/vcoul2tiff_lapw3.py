@@ -193,7 +193,8 @@ def run_lapw3(struct_path, vcoul_path, in2_path, n_atoms, s_max, beam):
     wd = Path(tempfile.mkdtemp(prefix='lapw3proj_'))
     try:
         (wd / 'case.struct').symlink_to(Path(struct_path).resolve())
-        (wd / 'case.vcoul').symlink_to(Path(vcoul_path).resolve())
+        # a copy, not a link: lapw3 ends with ENDFILE on this file, which would touch the original
+        shutil.copy(vcoul_path, wd / 'case.vcoul')
 
         # lapw3 takes the range of h, k, l from max(20, GMAX of case.in2) [1/bohr], not from s_max.
         # GMAX stands in the line after three header lines and one line per inequivalent atom.
