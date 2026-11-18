@@ -320,12 +320,12 @@ What it covers and what not:
   atom positions by 2π at its first call, and that first call sits inside a
   parallel loop (`fourir.frc`). Several threads can do it at the same time, and
   then every coefficient is wrong. Measured on graphene with 16 threads and the
-  full list of reflections: 2 of 5 repeated runs at sin θ/λ ≤ 6 1/Å and 2 of 15
+  full list of reflections: 2 of 5 repeated runs at sin θ/λ ≤ 6 1/Å and 3 of 45
   at ≤ 4 1/Å gave F(000) = −60.6 or −51.5 instead of −9.17 Ry·bohr³; with the
   reflections of one plane only (the layer file) 29 repeated runs were equal.
-  On one thread the loop cannot race. A plain `x lapw3` on a density runs the
-  same code; 30 repeated runs on `Graphene.clmsum` (≤ 3 1/Å, 16 threads) were
-  equal, though.
+  On one thread the loop cannot race, and 27 repeated runs at ≤ 4 1/Å were
+  equal. A plain `x lapw3` on a density runs the same code; 30 repeated runs on
+  `Graphene.clmsum` (≤ 3 1/Å, 16 threads) were equal, though.
 
 Checks (the difference DFT − IAM is smooth, so a plain grid sum is an accurate
 reference for it):
