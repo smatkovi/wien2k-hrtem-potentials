@@ -80,7 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lapw5grid import BOHR, conventional_vectors_ang, read_struct                    # noqa: E402
 from plot_kurasch_fig2 import (E2, _DT, _KIRK, doyle_turner_potential,               # noqa: E402
                                kirkland_potential, normalize_like_paper)
-from vcoul2tiff_lapw3 import read_operations, run_lapw3                              # noqa: E402
+from vcoul2tiff_lapw3 import all_reflections, read_operations, run_lapw3             # noqa: E402
 
 TWO_PI = 2 * math.pi
 
@@ -88,39 +88,22 @@ TWO_PI = 2 * math.pi
 # ═══════════════════════════════════════════════════════════════
 # CORE: from the list of lapw3 to the potential along the line
 #
-#   all_reflections     every reflection inside s_max from the one per symmetry class
-#   smooth_part         F(G) minus the reference, summed along the line
-#   reference_on_line   the reference (nuclei with Gaussian clouds) in real space
+#   reflections_in_sphere   the reflections inside s_max as arrays (all_reflections of
+#                           vcoul2tiff_lapw3.py makes them from the one per symmetry class)
+#   smooth_part             F(G) minus the reference, summed along the line
+#   reference_on_line       the reference (nuclei with Gaussian clouds) in real space
 # ═══════════════════════════════════════════════════════════════
 
-def all_reflections(listed, operations, cell, g_cut):
+def reflections_in_sphere(F_of, cell, g_cut):
     """
-    Every reflection with |G| <= g_cut from the list of lapw3 (one per symmetry class).
+    The reflections with |G| <= g_cut as arrays, and a check that none is missing.
 
-    A symmetry operation x' = M x + tau turns the reflection L into N = L M, and
-    F(N) = F(L) * exp(2 pi i L·tau).  With an inversion centre at the origin this factor is +1 or -1.
-    listed : {(h, k, l): F};  cell : lattice vectors [bohr], rows;  g_cut [1/bohr]
+    F_of : {(h, k, l): F} from all_reflections (vcoul2tiff_lapw3.py);  cell : lattice vectors [bohr], rows
     Returns hkl [n, 3] (integers), F [n], |G| [n] in 1/bohr.
     """
     recip = np.linalg.inv(cell).T                                 # rows b_i / 2 pi [1/bohr]
-    L = np.array(list(listed.keys()))
-    F_listed = np.array(list(listed.values()))
-    found = {}
-    for M_inv, tau in operations:
-        M = np.round(np.linalg.inv(M_inv)).astype(int)
-        factor = np.exp(TWO_PI * 1j * (L @ tau))
-        if np.abs(factor.imag).max() > 1e-6:
-            sys.exit("Error: complex symmetry factor; is the inversion centre at the origin?")
-        for N, value in zip(map(tuple, L @ M), F_listed * factor.real):
-            if N not in found:
-                found[N] = value
-            elif abs(found[N] - value) > 1e-6 * max(1.0, abs(value)):
-                # two operations disagree: the reflection is forbidden by symmetry, lapw3 prints ~0 for it
-                if max(abs(found[N]), abs(value)) > 1e-4:
-                    sys.exit(f"Error: symmetry operations give different values for reflection {N}")
-                found[N] = 0.0
-    hkl = np.array(list(found.keys()))
-    F = np.array(list(found.values()))
+    hkl = np.array(list(F_of.keys()))
+    F = np.array(list(F_of.values()))
     G = TWO_PI * np.linalg.norm(hkl @ recip, axis=1)
     inside = G <= g_cut
     hkl, F, G = hkl[inside], F[inside], G[inside]
@@ -247,8 +230,8 @@ def main():
     # the WIEN2k curves
     curves = []
     for vcoul in args.vcoul:
-        listed = run_lapw3(args.struct, vcoul, args.in2, len(struct['atoms']), 1.01 * args.smax, beam=None)
-        hkl, F, G = all_reflections(listed, operations, cell_bohr, g_cut)
+        listed = run_lapw3(args.struct, vcoul, args.in2, len(struct['atoms']), 1.01 * args.smax, plane=None)
+        hkl, F, G = reflections_in_sphere(all_reflections(listed, operations), cell_bohr, g_cut)
         v_ry = smooth_part(hkl, F, G, atoms, alpha, volume, start, args.direction, t) + reference_on_line(near_bohr, alpha)
         v = normalize_like_paper(v_ry[1:])                        # without the point on the nucleus
         curves.append((Path(vcoul).name, v))
