@@ -48,6 +48,10 @@ In the order of use:
 * `src/vcoul2tiff_lapw3.py` — the second route: Fourier coefficients of
   `case.vcoul` from WIEN2k's lapw3, summed on the ixchel grid for a chosen zone
   axis; writes the layer TIFF ready for `ixchel main` and a one-layer cfg.
+* `src/run_graphene_lapw3.sh` — the complete list of commands for graphene by
+  the second route: WIEN2k, the line scan below, the layer files, `ixchel main`.
+* `src/plot_kurasch_fig2_lapw3.py` — the paper's Fig. 2 for a crystal: the
+  potential on a line from a nucleus, summed from the lapw3 coefficients.
 * `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
   side, so that it covers the ixchel `dim` grid. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
@@ -294,6 +298,8 @@ The script finds the rectangular image cell itself, runs `lapw3` in a temporary
 directory, and writes `atompota.tif` on the `dim` grid together with
 `crystal.cfg` (one layer of thickness |t|, with the atoms of the image cell).
 It prints the lattice vectors that span the image cell.
+`src/run_graphene_lapw3.sh` is the complete list of commands for graphene by
+this route, from the structure file to `ixchel main`.
 
 What it covers and what not:
 
@@ -310,6 +316,15 @@ What it covers and what not:
   band limit to every layer file in the same way.
 * `lapw3` of WIEN2k 24.1 is used unchanged, but for a purpose it was not written
   for. The checks below are the evidence that it works on a potential file.
+* The scripts run `lapw3` on ONE thread. Its routine `USTPHX` multiplies the
+  atom positions by 2π at its first call, and that first call sits inside a
+  parallel loop (`fourir.frc`). Several threads can do it at the same time, and
+  then every coefficient is wrong. Measured on graphene with 16 threads and the
+  full list of reflections: 2 of 5 repeated runs at sin θ/λ ≤ 6 1/Å and 2 of 15
+  at ≤ 4 1/Å gave F(000) = −60.6 or −51.5 instead of −9.17 Ry·bohr³; with the
+  reflections of one plane only (the layer file) 29 repeated runs were equal.
+  On one thread the loop cannot race. A plain `x lapw3` on a density runs the
+  same code.
 
 Checks (the difference DFT − IAM is smooth, so a plain grid sum is an accurate
 reference for it):
@@ -328,6 +343,44 @@ reference for it):
 
 Rutile (P4₂/mnm) has symmetry operations with translations, so these rows also
 test the phase factors between equivalent reflections.
+
+### The paper's Fig. 2 for graphene, from the same coefficients
+
+The paper's Fig. 2 is a line scan of the starting potential of a single carbon
+atom (section *Figures 2 and 3 of the paper*). `src/plot_kurasch_fig2_lapw3.py`
+draws the same figure for the crystal, along a line from a nucleus, with the
+WIEN2k curve summed from the lapw3 coefficients of ALL reflections (the layer
+file uses only those perpendicular to the beam):
+
+```bash
+$PY $REPO/src/plot_kurasch_fig2_lapw3.py --struct Graphene.struct --in2 Graphene.in2 \
+    --vcoul Graphene.vcoul_IAM Graphene.vcoul_DFT --direction 0 0 1 -o kurasch_fig2_graphene_lapw3.png
+```
+
+A finite Fourier sum cannot give −2Z/r at the nucleus. The script therefore
+subtracts the coefficients of point nuclei with Gaussian clouds of charge −Z,
+sums the smooth remainder, and adds that reference again in real space. The
+comparison curves are Kirkland and Doyle–Turner atoms summed over all atom
+positions of the crystal. Result (`reference/kurasch_fig2_graphene_lapw3.png`),
+line along c from the nucleus into the vacuum, smallest value set to zero as in
+the paper:
+
+| distance [Å] | WIEN2k start (IAM) [V] | WIEN2k SCF [V] | Kirkland atoms [V] | Doyle–Turner atoms [V] |
+|---|---|---|---|---|
+| 0.004 | 21 206 | 21 202 | 21 347 | 1 589 |
+| 0.02 | 3 932 | 3 928 | 3 930 | 1 532 |
+| 0.1 | 562.8 | 557.6 | 562.9 | 671.2 |
+| 0.2 | 212.9 | 207.6 | 213.5 | 198.7 |
+| 0.5 | 41.76 | 38.52 | 42.12 | 41.48 |
+| 1.0 | 5.35 | 4.15 | 5.34 | 5.28 |
+| 2.0 | 0.196 | 0.072 | 0.183 | 0.132 |
+
+Against a lapw5c line scan of the same file along the same line (before the
+shift), the curve differs by at most 3.1 V up to 0.02 Å (of 5 000 to 21 000 V),
+1.3 V up to 0.1 Å, 0.10 V up to 0.4 Å, 0.05 V up to 1 Å and 0.006 V beyond;
+IAM and DFT file alike. The last number is the ripple of the cut sum, so the
+figure ends at 0.01 V (the paper's axis goes to 1e-6 V). Another width of the
+Gaussian clouds changes the curve by 1e-9 V.
 
 ## Results for graphene
 

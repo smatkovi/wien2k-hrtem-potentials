@@ -60,6 +60,7 @@ Dependencies: numpy, tifffile; lapw3 on PATH ($WIENROOT)
 import argparse
 import itertools
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -187,7 +188,9 @@ def layer_on_grid(coefficients, ncell, dim):
 
 def run_lapw3(struct_path, vcoul_path, in2_path, n_atoms, s_max, beam):
     """Run lapw3 on the potential file in a temporary directory.  Returns {(h, k, l): F [Ry bohr^3]}
-    for one reflection of every symmetry class up to sin(theta)/lambda = s_max [1/Å]."""
+    for one reflection of every symmetry class up to sin(theta)/lambda = s_max [1/Å].
+    beam : (u, v, w); for a beam along one cell axis only the reflections of that plane are asked for.
+           None = all reflections (plot_kurasch_fig2_lapw3.py)."""
     if shutil.which('lapw3') is None:
         sys.exit("Error: lapw3 not found on PATH (source the WIEN2k environment)")
     wd = Path(tempfile.mkdtemp(prefix='lapw3proj_'))
@@ -212,10 +215,16 @@ def run_lapw3(struct_path, vcoul_path, in2_path, n_atoms, s_max, beam):
 
         # the answers to the questions of lapw3: the resolution; a negative one makes it ask for a
         # plane of reflections (HK: only l = 0, KL: only h = 0, LH: only k = 0); then the normalisation
-        plane = {(False, False, True): 'HK', (True, False, False): 'KL', (False, True, False): 'LH'}.get(
-            tuple(i != 0 for i in beam))
+        plane = None if beam is None else {(False, False, True): 'HK', (True, False, False): 'KL',
+                                           (False, True, False): 'LH'}.get(tuple(i != 0 for i in beam))
         answers = f"-{s_max:.4f}\n{plane}\nVAL\n" if plane else f"{s_max:.4f}\nVAL\n"
-        res = subprocess.run(['lapw3', 'lapw3.def'], cwd=wd, input=answers, capture_output=True, text=True)
+
+        # ONE thread.  lapw3 of WIEN2k 24.1 multiplies the atom positions by 2 pi at the first call of
+        # its routine USTPHX, and that first call happens inside a parallel loop (fourir.frc).  With
+        # several threads the positions can be multiplied more than once, and then every coefficient
+        # is wrong (measured on graphene with the full list: 2 of 5 runs at s_max = 6).
+        res = subprocess.run(['lapw3', 'lapw3.def'], cwd=wd, input=answers, capture_output=True, text=True,
+                             env=dict(os.environ, OMP_NUM_THREADS='1'))
         out = wd / 'case.output3'
         text = out.read_text(errors='replace') if out.exists() else ''
         if res.returncode != 0 or 'X - RAY STRUCTURFACTORS' not in text:
