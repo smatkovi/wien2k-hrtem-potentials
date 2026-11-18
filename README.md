@@ -324,7 +324,8 @@ What it covers and what not:
   at ≤ 4 1/Å gave F(000) = −60.6 or −51.5 instead of −9.17 Ry·bohr³; with the
   reflections of one plane only (the layer file) 29 repeated runs were equal.
   On one thread the loop cannot race. A plain `x lapw3` on a density runs the
-  same code.
+  same code; 30 repeated runs on `Graphene.clmsum` (≤ 3 1/Å, 16 threads) were
+  equal, though.
 
 Checks (the difference DFT − IAM is smooth, so a plain grid sum is an accurate
 reference for it):

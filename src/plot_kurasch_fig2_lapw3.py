@@ -294,10 +294,11 @@ def main():
     print(f"saved {args.o}")
 
     # the numbers at some distances
-    print("\n   r [Å]  " + "".join(f"{name[-12:]:>14s}" for name, _ in curves) + "      Kirkland  Doyle-Turner   [V]")
+    width = max(len(name) for name, _ in curves) + 2
+    print("\n   r [Å]  " + "".join(f"{name:>{width}s}" for name, _ in curves) + "      Kirkland  Doyle-Turner   [V]")
     for distance in [0.004, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0]:
         j = int(np.argmin(np.abs(r - distance)))
-        print(f"  {r[j]:6.3f}  " + "".join(f"{v[j]:14.4f}" for _, v in curves) + f"{v_kirk[j]:14.4f}{v_dt[j]:14.4f}")
+        print(f"  {r[j]:6.3f}  " + "".join(f"{v[j]:{width}.4f}" for _, v in curves) + f"{v_kirk[j]:14.4f}{v_dt[j]:14.4f}")
 
 
 if __name__ == '__main__':
