@@ -45,6 +45,9 @@ In the order of use:
 * `src/vcoul2tiff_ulm.py` — steps 2 to 5 of the method: cutoff, shift,
   projection per layer, conversion to 1/Å. Writes one TIFF per layer, each
   holding one unit cell.
+* `src/angles2beam.py` — lists the lattice directions [u v w] closest to a beam
+  given by two angles (tilt away from a zone axis, azimuth about it), with the
+  period along each; a help for choosing `--beam`.
 * `src/vcoul2tiff_lapw3.py` — the second route: Fourier coefficients of
   `case.vcoul` from WIEN2k's lapw3, summed on the ixchel grid for a chosen zone
   axis; writes the layer TIFF ready for `ixchel main` and a one-layer cfg.
