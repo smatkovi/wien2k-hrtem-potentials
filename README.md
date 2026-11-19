@@ -315,7 +315,16 @@ What it covers and what not:
   around the nuclei and can be negative there; `ixchel main` applies its own
   band limit to every layer file in the same way.
 * `lapw3` of WIEN2k 24.1 is used unchanged, but for a purpose it was not written
-  for. The checks below are the evidence that it works on a potential file.
+  for. The user's guide (section 8.13) describes it for the charge density
+  only. P. Blaha confirmed the use on `case.vcoul` on the WIEN2k mailing list
+  ([thread "Calculation of Electron Structure Factor by lapw3", 2017](https://www.mail-archive.com/wien@zeus.theochem.tuwien.ac.at/msg16494.html)):
+  "It should work, however, you must select "VAL", as the R2V files are
+  normalized in the same way as the clmval files" (23 Sep 2017), and "the
+  negative sign and the convention about the factor 2 PI is not considered
+  when one uses a program which was designed originally for X-ray structure
+  factors" (2 Oct 2017). The script answers `VAL`; its sign and factor do not
+  rest on that thread but on the checks below, which are the evidence that it
+  works on a potential file.
 * The scripts run `lapw3` on ONE thread. Its routine `USTPHX` multiplies the
   atom positions by 2π at its first call, and that first call sits inside a
   parallel loop (`fourir.frc`). Several threads can do it at the same time, and
