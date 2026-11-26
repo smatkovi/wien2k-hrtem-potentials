@@ -55,6 +55,9 @@ In the order of use:
   the second route: WIEN2k, the line scan below, the layer files, `ixchel main`.
 * `src/plot_kurasch_fig2_lapw3.py` — the paper's Fig. 2 for a crystal: the
   potential on a line from a nucleus, summed from the lapw3 coefficients.
+* `src/line_integral_lapw3.py` — the potential integrated along a straight line
+  between two points (where the electron enters and where it leaves), in closed
+  form from the lapw3 coefficients; any direction, no period needed.
 * `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
   side, so that it covers the ixchel `dim` grid. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
@@ -394,6 +397,52 @@ shift), the curve differs by at most 3.1 V up to 0.02 Å (of 5 000 to 21 000 V),
 IAM and DFT file alike. The last number is the ripple of the cut sum, so the
 figure ends at 0.01 V (the paper's axis goes to 1e-6 V). Another width of the
 Gaussian clouds changes the curve by 1e-9 V.
+
+### Line integral between two points, from the same coefficients
+
+`src/line_integral_lapw3.py` integrates the potential along the straight line
+from the point where the electron enters to the point where it leaves. Every
+term of the Fourier sum is integrated in closed form (M the middle of the
+line, D the vector from entry to exit, S its length):
+
+    ∫ V ds = S/Ω · Σ_G F(G) · exp(i G·M) · sin(G·D/2) / (G·D/2)
+
+The line may have any direction and length; nothing has to repeat along it.
+For D equal to a lattice vector only the reflections with G·D = 0 remain,
+which is the projection of `vcoul2tiff_lapw3.py`. The nuclei are taken out of
+the sum and added in real space, as for Fig. 2 above.
+
+```bash
+$PY $REPO/src/line_integral_lapw3.py --struct Graphene.struct --in2 Graphene.in2 \
+    --vcoul Graphene.vcoul_DFT --entry 0.1 0.2 -0.3 --exit 0.45 0.3 0.3
+```
+
+Checks on graphene (`Graphene.vcoul_DFT`, s_max = 6 1/Å; V_s = −V_C, zero of
+the potential as lapw0 defines it) against lapw5c values of the same file on
+20 001 points of the line, summed numerically:
+
+| line (fractions of the cell) | length [Å] | closest nucleus [Å] | this script [V·Å] | lapw5c [V·Å] |
+|---|---|---|---|---|
+| along c through the middle of a hexagon | 15.000 | 1.421 | −28.0241 | −28.0242 |
+| along c, 0.1 Å beside a nucleus | 15.000 | 0.100 | 176.5306 | 176.5320 |
+| (0.1 0.2 −0.3) to (0.45 0.3 0.3) | 9.033 | 0.876 | −7.5532 | −7.5532 |
+| (0.1 0.2 −0.2) to (3.37 1.91 0.2), across three cells | 9.198 | 0.716 | 6.9595 | 6.9594 |
+| (0.05 0.1 0.02) to (2.2 1.7 0.02), in the plane of the sheet | 4.761 | 0.308 | 106.2800 | 106.2817 |
+| (0.30 0.60 −0.2) to (0.34 0.68 0.003), ends inside an atom | 3.050 | 0.026 | 304.3721 | 304.3722 |
+| along c through the middle of a bond | 15.000 | 0.710 | −9.2705 | −9.2226 |
+
+* The last row differs by 0.048 V·Å because of the potential file, not of the
+  integration: along the bond `case.vcoul` jumps by 0.41 V at the surface of
+  the atomic sphere (lapw5c: −1.4848 Ry just inside, −1.5152 Ry just outside).
+  The two spheres leave a gap of 0.025 bohr, and that line runs inside the gap
+  for about 0.2 Å. The Fourier sum up to s_max = 6 does not resolve the gap.
+* A line through a nucleus has an infinite integral. Towards a nucleus the
+  result grows by 397.88 V·Å per factor 10 in the distance (carbon), the value
+  4Z ln 10 Ry·bohr of the bare nucleus; measured from 0.001 Å down to 1e-5 Å.
+  The plain sum without the nuclei taken out stays finite (483.5 V·Å through
+  the nucleus at s_max = 6, 412.8 at s_max = 4).
+* s_max = 4 instead of 6 changes the result by 0.001 V·Å at 1 Å from a
+  nucleus, 0.03 V·Å at 0.1 to 0.3 Å and 0.3 V·Å at 0.01 Å and closer.
 
 ## Results for graphene
 
