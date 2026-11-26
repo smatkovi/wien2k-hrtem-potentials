@@ -34,6 +34,15 @@ Method:
      nucleus.  The first part is the bare nucleus in closed form, the second
      is smooth and is integrated numerically.
 
+  4. With --radius R the line becomes a cylinder: the two points are the centres
+     of its end faces, and the result is the mean of the line integral over
+     the cross-section (the integral over the cylinder divided by pi R²).  In
+     the sum that is one more factor for every term,
+         2 J1(G⊥ R) / (G⊥ R),   G⊥ = the part of G perpendicular to the line,
+     and for the reference a mean over the circular face (reference_on_line).
+     The mean is finite even if the axis passes through a nucleus, but it then
+     depends on R: it grows like 4Z ln(1/R).
+
 The script prints two numbers for every potential file: the plain sum of step
 2 (always finite, but cut at s_max), and the sum with the nuclei taken out
 (step 3), which is the result.  Far from the nuclei the two agree.
@@ -60,6 +69,8 @@ Arguments and where they come from:
                  conventional cell, like the atom positions in case.struct
                  (fractions such as 1/3 are accepted)
     --exit       X Y Z, where it leaves
+    --radius     R [Å]: mean over a cylinder of this radius around the line
+                 (default 0, the line itself)
     --smax       largest sin(theta)/lambda of the reflections [1/Å] (default 6;
                  lapw3 then takes about a minute per file for graphene)
 
@@ -75,7 +86,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.integrate import quad
-from scipy.special import erf
+from scipy.special import erf, j1
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lapw5grid import BOHR, conventional_vectors_ang, read_struct                    # noqa: E402
@@ -86,17 +97,28 @@ from vcoul2tiff_ulm import RY_TO_V                                              
 TWO_PI = 2 * math.pi
 
 
-def integral_of_sum(hkl, coefficients, volume, entry, exit_):
+def integrated_terms(hkl, G, cell, entry, exit_, radius):
     """
-    Step 2: the line integral of  1/Ω · Σ_G c(G) exp(i G·r)  from entry to exit, divided by the length.
+    Step 2: for every reflection the integral of exp(i G·r) from entry to exit, divided by the length.
 
     In fractional coordinates G·r = 2 pi hkl·x, so with the middle m and the difference d of the two
     points:  exp(i G·M) = exp(2 pi i hkl·m)  and  sin(G·D/2) / (G·D/2) = sin(pi hkl·d) / (pi hkl·d),
     which is numpy's sinc(hkl·d).  The imaginary parts of G and -G cancel, the cosine remains.
-    Returns the mean value of the sum on the line [unit of c / unit of Ω].
+
+    Step 4, radius > 0: the mean over a disc of that radius perpendicular to the line multiplies the
+    term by 2 J1(x)/x with x = G⊥ · radius.  Along the line G has the component G·D / S, and
+    G⊥² = G² - (G·D / S)².
+    G [1/bohr], cell [bohr], radius [bohr].  Returns one number per reflection.
     """
     middle = (entry + exit_) / 2
-    return np.sum(coefficients * np.cos(TWO_PI * (hkl @ middle)) * np.sinc(hkl @ (exit_ - entry))) / volume
+    d = exit_ - entry
+    terms = np.cos(TWO_PI * (hkl @ middle)) * np.sinc(hkl @ d)
+    if radius > 0:
+        g_along = TWO_PI * (hkl @ d) / np.linalg.norm(d @ cell)
+        x = np.sqrt(np.maximum(G ** 2 - g_along ** 2, 0.0)) * radius
+        not_zero = x > 1e-9
+        terms[not_zero] *= 2 * j1(x[not_zero]) / x[not_zero]             # the factor is 1 for x = 0
+    return terms
 
 
 def reference_coefficients(hkl, G, atoms, alpha):
@@ -116,24 +138,42 @@ def reference_coefficients(hkl, G, atoms, alpha):
     return F_ref
 
 
-def reference_on_line(struct, cell, entry, exit_, alpha):
+def arc_inside(rho, rho0, radius):
+    """
+    The angle [rad] of the circle of radius rho around a nucleus that lies inside the disc.
+
+    The disc has the given radius, the nucleus sits at the distance rho0 from its centre.  The whole
+    circle (2 pi) lies inside if rho <= radius - rho0, nothing if the two do not meet.
+    """
+    if rho0 < 1e-9:                                        # the nucleus on the axis
+        return TWO_PI if rho < radius else 0.0
+    return 2 * math.acos(min(1.0, max(-1.0, (rho ** 2 + rho0 ** 2 - radius ** 2) / (2 * rho * rho0))))
+
+
+def reference_on_line(struct, cell, entry, exit_, alpha, radius=0.0):
     """
     Step 3: the line integral of the reference in real space [Ry·bohr], and the nucleus closest to the line.
 
-    A nucleus at the distance rho from the line, closest to the line point s0 (s = distance from
+    A nucleus at the distance rho from a line, closest to the line point s0 (s = distance from
     the entry point), contributes  -2Z erfc(alpha d)/d  with d² = rho² + (s - s0)².  Beyond
     d = 6/alpha that is zero, so only the piece s1..s2 of the line inside that range counts:
-        -2Z [asinh((s2 - s0)/rho) - asinh((s1 - s0)/rho)]  +  2Z ∫ erf(alpha d)/d ds
-    Returns (integral, (distance of the closest nucleus [bohr], its name)).  The integral is
-    -infinity if the line passes through a nucleus.
+        g(rho) = -2Z [asinh((s2 - s0)/rho) - asinh((s1 - s0)/rho)]  +  2Z ∫ erf(alpha d)/d ds
+
+    Step 4, radius > 0: the mean of g over the disc around the line.  g depends only on the distance
+    rho from the nucleus, so the mean is a sum over circles around the nucleus, each counted with
+    the part of it that lies inside the disc (arc_inside); rho0 = distance of the nucleus from the axis:
+        1 / (pi R²) · ∫ g(rho) · rho · arc_inside(rho) d rho      from |rho0 - R| or 0 to rho0 + R
+
+    Returns (integral, (distance of the closest nucleus from the line [bohr], its name)).  For the
+    line itself (radius 0) the integral is -infinity if the line passes through a nucleus.
     """
     a, b = entry @ cell, exit_ @ cell                       # the two points [bohr]
     length = np.linalg.norm(b - a)
     u = (b - a) / length                                    # unit vector along the line
     reach = 6.0 / alpha
 
-    # the cells whose atoms can lie within `reach` of the line, one more on every side
-    margin = reach * np.linalg.norm(np.linalg.inv(cell).T, axis=1)          # in fractions of the cell
+    # the cells whose atoms can lie within `reach` of the line or cylinder, one more on every side
+    margin = (reach + radius) * np.linalg.norm(np.linalg.inv(cell).T, axis=1)       # in fractions of the cell
     low = np.floor(np.minimum(entry, exit_) - margin).astype(int) - 2
     high = np.ceil(np.maximum(entry, exit_) + margin).astype(int) + 1
     shifts = np.array(list(itertools.product(*[range(lo, hi + 1) for lo, hi in zip(low, high)])))
@@ -144,20 +184,33 @@ def reference_on_line(struct, cell, entry, exit_, alpha):
         for pos in at['positions']:
             centres = (np.array(pos) + shifts) @ cell                       # this atom in all those cells
             s0 = (centres - a) @ u                                          # closest point of the infinite line
-            rho = np.linalg.norm(centres - a - np.outer(s0, u), axis=1)     # distance from the infinite line
+            rho0 = np.linalg.norm(centres - a - np.outer(s0, u), axis=1)    # distance from the infinite line
             on_line = np.clip(s0, 0.0, length)                              # closest point between entry and exit
             distance = np.linalg.norm(centres - a - np.outer(on_line, u), axis=1)
             if distance.min() < closest[0]:
                 closest = (distance.min(), at['name'])
-            for i in np.flatnonzero(distance < reach):
-                s1, s2 = max(0.0, s0[i] - reach), min(length, s0[i] + reach)
-                if distance[i] < 1e-6:                      # the nucleus lies on the line (positions in case.struct have 8 digits)
-                    return -np.inf, closest
-                r = max(rho[i], 1e-12)                      # a nucleus on the extension of the line: rho = 0, but d > 0 on the line
-                bare = -2 * Z * (math.asinh((s2 - s0[i]) / r) - math.asinh((s1 - s0[i]) / r))
-                cloud = 2 * Z * quad(lambda s: erf(alpha * math.hypot(r, s - s0[i])) / math.hypot(r, s - s0[i]),
-                                     s1, s2, epsabs=1e-12, epsrel=1e-12)[0]
-                total += bare + cloud
+            for i in np.flatnonzero((rho0 < reach + radius) & (s0 > -reach) & (s0 < length + reach)):
+                s1, s2, at_s0 = max(0.0, s0[i] - reach), min(length, s0[i] + reach), s0[i]
+
+                def g(rho):
+                    """The contribution of this nucleus to the line at the distance rho from it."""
+                    r = max(rho, 1e-12)             # a nucleus on the extension of the line: rho = 0, but d > 0 on the line
+                    bare = -2 * Z * (math.asinh((s2 - at_s0) / r) - math.asinh((s1 - at_s0) / r))
+                    cloud = 2 * Z * quad(lambda s: erf(alpha * math.hypot(r, s - at_s0)) / math.hypot(r, s - at_s0),
+                                         s1, s2, epsabs=1e-12, epsrel=1e-12)[0]
+                    return bare + cloud
+
+                if radius == 0:
+                    if distance[i] < 1e-6:          # the nucleus lies on the line (positions in case.struct have 8 digits)
+                        return -np.inf, closest
+                    total += g(rho0[i])
+                else:
+                    inner, outer = max(0.0, rho0[i] - radius), min(reach, rho0[i] + radius)
+                    if inner < outer:
+                        whole = radius - rho0[i]    # up to here the whole circle lies inside the disc
+                        total += quad(lambda rho: g(rho) * rho * arc_inside(rho, rho0[i], radius), inner, outer,
+                                      points=[whole] if inner < whole < outer else None,
+                                      epsabs=1e-11, epsrel=1e-11, limit=200)[0] / (np.pi * radius ** 2)
     return total, closest
 
 
@@ -171,6 +224,7 @@ def main():
                     help='where the electron enters, fractional coordinates of the cell')
     ap.add_argument('--exit', type=Fraction, nargs=3, required=True, metavar=('X', 'Y', 'Z'),
                     help='where it leaves')
+    ap.add_argument('--radius', type=float, default=0.0, help='radius of a cylinder around the line [Å] (default 0)')
     ap.add_argument('--smax', type=float, default=6.0, help='largest sin(theta)/lambda [1/Å]')
     args = ap.parse_args()
 
@@ -192,19 +246,23 @@ def main():
     if length < 1e-9:
         sys.exit("Error: --entry and --exit are the same point")
     print(f"line: from {entry} to {exit_} (fractions of the cell), length {length * BOHR:.4f} Å")
+    radius = args.radius / BOHR                                   # [bohr]
+    if radius > 0:
+        print(f"cylinder of radius {args.radius:g} Å around the line: mean over its cross-section")
 
     # the sum is cut at g_cut; the width of the Gaussian clouds is tied to it as in plot_kurasch_fig2_lapw3.py
     g_cut = 4 * np.pi * args.smax * BOHR                          # [1/bohr]
     alpha = g_cut / 10.0                                          # [1/bohr]
-    reference, (distance, name) = reference_on_line(struct, cell, entry, exit_, alpha)
+    reference, (distance, name) = reference_on_line(struct, cell, entry, exit_, alpha, radius)
     print(f"closest nucleus: {name}, {distance * BOHR:.6f} Å from the line")
 
     to_volt_ang = -RY_TO_V * BOHR                                 # Ry·bohr -> V·Å, and V_s = -V_C
     for vcoul in args.vcoul:
         listed = run_lapw3(args.struct, vcoul, args.in2, len(struct['atoms']), 1.01 * args.smax, plane=None)
         hkl, F, G = reflections_in_sphere(all_reflections(listed, operations), cell, g_cut)
-        plain = length * integral_of_sum(hkl, F, volume, entry, exit_)
-        smooth = length * integral_of_sum(hkl, F - reference_coefficients(hkl, G, atoms, alpha), volume, entry, exit_)
+        terms = integrated_terms(hkl, G, cell, entry, exit_, radius)
+        plain = length / volume * np.sum(F * terms)
+        smooth = length / volume * np.sum((F - reference_coefficients(hkl, G, atoms, alpha)) * terms)
         print(f"{Path(vcoul).name}: lapw3 listed {len(listed)} reflections, {len(hkl)} used")
         print(f"    plain sum up to s_max = {args.smax:g} 1/Å:   {plain * to_volt_ang:14.4f} V·Å")
         if np.isinf(reference):

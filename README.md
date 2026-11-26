@@ -57,7 +57,8 @@ In the order of use:
   potential on a line from a nucleus, summed from the lapw3 coefficients.
 * `src/line_integral_lapw3.py` — the potential integrated along a straight line
   between two points (where the electron enters and where it leaves), in closed
-  form from the lapw3 coefficients; any direction, no period needed.
+  form from the lapw3 coefficients; any direction, no period needed. With
+  `--radius` the mean over a cylinder around that line.
 * `src/tiff2ixchel.py` — copies a one-unit-cell layer TIFF NCELL times side by
   side, so that it covers the ixchel `dim` grid. Required before `ixchel main`.
 * `src/ixchel_tiff.py` — the TIFF layout of ixchel in one place (page 0 preview,
@@ -456,6 +457,41 @@ nucleus term:
   potentials 2.5693 and 3.0505 V of the table above. Lines of DFT and IAM can
   only be compared after subtracting vacuum level × length: the hexagon line
   then gives 6.751 (DFT) and 8.659 V·Å (IAM).
+
+With `--radius R` the line becomes a cylinder whose end faces have their
+centres on the two points; the result is the mean of the line integral over
+the cross-section (the integral over the cylinder divided by πR²). In the sum
+that is one more factor per term, 2 J₁(G⊥R)/(G⊥R) with G⊥ the part of G
+perpendicular to the line; the nuclei are averaged over the disc in real
+space. The mean is finite even if the axis passes through a nucleus, but it
+then depends on R:
+
+```bash
+$PY $REPO/src/line_integral_lapw3.py --struct Graphene.struct --in2 Graphene.in2 \
+    --vcoul Graphene.vcoul_DFT --entry 1/3 2/3 -0.5 --exit 1/3 2/3 0.5 --radius 0.1
+```
+
+| R [Å], axis along c through a nucleus | 0.3 | 0.1 | 0.03 | 0.01 | 0.001 |
+|---|---|---|---|---|---|
+| mean over the cylinder [V·Å] | 103.81 | 253.03 | 450.03 | 638.61 | 1036.32 |
+| minus the line at the distance R [V·Å] | 58.30 | 76.50 | 85.02 | 86.24 | 86.40 |
+
+The cylinder option is not checked against lapw5c but against the line
+integral of the same script and against itself:
+
+* the mean of line values over the disc (20 × 12 and 20 × 24 Gauss points
+  around the nucleus) equals the cylinder value to 1e-4 V·Å, for the axis
+  through a nucleus and for an axis 0.05 Å beside it (R = 0.1 Å: 253.0266 and
+  235.4028 V·Å);
+* R = 0.001 Å around a line far from the nuclei returns the line value;
+* the last row of the table tends to 2Z Ry·bohr = 86.40 V·Å, the value for a
+  bare nucleus (a check of consistency, as above);
+* s_max = 4 instead of 6 changes the result by 0.08 V·Å (R = 0.05 Å, nucleus
+  on the axis), 0.03 (R = 0.1 Å), 0.001 (R = 0.3 Å), and by at most 0.005 V·Å
+  with the nucleus beside the axis, on the rim or outside the disc;
+* without the nuclei taken out, the plain sum with the Bessel factor differs
+  from the result by 58.7 V·Å at R = 0.02 Å, 1.6 at 0.1 Å, 0.1 at 0.3 Å and
+  0.02 at 0.6 Å (nucleus on the axis): it converges, but slowly for small R.
 * s_max = 4 instead of 6 changes the result by 0.001 V·Å at 1 Å from a
   nucleus, 0.03 V·Å at 0.1 to 0.3 Å and 0.3 V·Å at 0.01 Å and closer.
 
