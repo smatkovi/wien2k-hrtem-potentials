@@ -419,7 +419,11 @@ $PY $REPO/src/line_integral_lapw3.py --struct Graphene.struct --in2 Graphene.in2
 
 Checks on graphene (`Graphene.vcoul_DFT`, s_max = 6 1/Å; V_s = −V_C, zero of
 the potential as lapw0 defines it) against lapw5c values of the same file on
-20 001 points of the line, summed numerically:
+20 001 points of the line. For that comparison the bare nuclei closer than
+2 bohr to the line were taken out of the lapw5c values, the rest was summed
+numerically, and the nuclei were added with the same closed form as in the
+script. Close to a nucleus the rows therefore test everything but the bare
+nucleus term:
 
 | line (fractions of the cell) | length [Å] | closest nucleus [Å] | this script [V·Å] | lapw5c [V·Å] |
 |---|---|---|---|---|
@@ -429,18 +433,29 @@ the potential as lapw0 defines it) against lapw5c values of the same file on
 | (0.1 0.2 −0.2) to (3.37 1.91 0.2), across three cells | 9.198 | 0.716 | 6.9595 | 6.9594 |
 | (0.05 0.1 0.02) to (2.2 1.7 0.02), in the plane of the sheet | 4.761 | 0.308 | 106.2800 | 106.2817 |
 | (0.30 0.60 −0.2) to (0.34 0.68 0.003), ends inside an atom | 3.050 | 0.026 | 304.3721 | 304.3722 |
+| (1/3 2/3 0.02) to (1/3 2/3 0.5), a nucleus 0.3 Å behind the entry point | 7.200 | 0.300 | 5.1307 | 5.1309 |
 | along c through the middle of a bond | 15.000 | 0.710 | −9.2705 | −9.2226 |
 
 * The last row differs by 0.048 V·Å because of the potential file, not of the
   integration: along the bond `case.vcoul` jumps by 0.41 V at the surface of
   the atomic sphere (lapw5c: −1.4848 Ry just inside, −1.5152 Ry just outside).
-  The two spheres leave a gap of 0.025 bohr, and that line runs inside the gap
-  for about 0.2 Å. The Fourier sum up to s_max = 6 does not resolve the gap.
-* A line through a nucleus has an infinite integral. Towards a nucleus the
-  result grows by 397.88 V·Å per factor 10 in the distance (carbon), the value
-  4Z ln 10 Ry·bohr of the bare nucleus; measured from 0.001 Å down to 1e-5 Å.
-  The plain sum without the nuclei taken out stays finite (483.5 V·Å through
-  the nucleus at s_max = 6, 412.8 at s_max = 4).
+  The two spheres leave a gap of 0.025 bohr, and the middle of the bond lies
+  in it. The Fourier sum up to s_max = 6 does not resolve the gap: on that line
+  it lies 0.28 V above lapw5c at the middle of the bond, 0.13 V at 0.09 Å from
+  it and agrees from 0.18 Å on.
+* A line through a nucleus has an infinite integral; the script says so. The
+  plain sum without the nuclei taken out stays finite there, but its value
+  depends on the cut (483.5 V·Å at s_max = 6, 412.8 at s_max = 4).
+* Towards a nucleus the result grows by 397.88 V·Å per factor 10 in the
+  distance (carbon, from 0.001 Å down to 1e-5 Å). That is 4Z ln 10 Ry·bohr, the
+  bare nucleus, which the script adds in closed form: a check of consistency,
+  not a measurement of the file.
+* The two potential files have different zeros. A short line in the vacuum
+  gives the vacuum level: V_s = −2.3184 V (DFT) and −2.8156 V (IAM), which
+  with the printed mean values (0.2509 and 0.2349 V) are the mean inner
+  potentials 2.5693 and 3.0505 V of the table above. Lines of DFT and IAM can
+  only be compared after subtracting vacuum level × length: the hexagon line
+  then gives 6.751 (DFT) and 8.659 V·Å (IAM).
 * s_max = 4 instead of 6 changes the result by 0.001 V·Å at 1 Å from a
   nucleus, 0.03 V·Å at 0.1 to 0.3 Å and 0.3 V·Å at 0.01 Å and closer.
 

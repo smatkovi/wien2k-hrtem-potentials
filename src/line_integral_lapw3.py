@@ -151,10 +151,11 @@ def reference_on_line(struct, cell, entry, exit_, alpha):
                 closest = (distance.min(), at['name'])
             for i in np.flatnonzero(distance < reach):
                 s1, s2 = max(0.0, s0[i] - reach), min(length, s0[i] + reach)
-                if rho[i] < 1e-6:                           # through the nucleus (positions in case.struct have 8 digits)
+                if distance[i] < 1e-6:                      # the nucleus lies on the line (positions in case.struct have 8 digits)
                     return -np.inf, closest
-                bare = -2 * Z * (math.asinh((s2 - s0[i]) / rho[i]) - math.asinh((s1 - s0[i]) / rho[i]))
-                cloud = 2 * Z * quad(lambda s: erf(alpha * math.hypot(rho[i], s - s0[i])) / math.hypot(rho[i], s - s0[i]),
+                r = max(rho[i], 1e-12)                      # a nucleus on the extension of the line: rho = 0, but d > 0 on the line
+                bare = -2 * Z * (math.asinh((s2 - s0[i]) / r) - math.asinh((s1 - s0[i]) / r))
+                cloud = 2 * Z * quad(lambda s: erf(alpha * math.hypot(r, s - s0[i])) / math.hypot(r, s - s0[i]),
                                      s1, s2, epsabs=1e-12, epsrel=1e-12)[0]
                 total += bare + cloud
     return total, closest
