@@ -442,7 +442,7 @@ nucleus term:
   The two spheres leave a gap of 0.025 bohr, and the middle of the bond lies
   in it. The Fourier sum up to s_max = 6 does not resolve the gap: on that line
   it lies 0.28 V above lapw5c at the middle of the bond, 0.13 V at 0.09 Å from
-  it and agrees from 0.18 Å on.
+  it, and within 0.02 V from 0.18 Å on.
 * A line through a nucleus has an infinite integral; the script says so. The
   plain sum without the nuclei taken out stays finite there, but its value
   depends on the cut (483.5 V·Å at s_max = 6, 412.8 at s_max = 4).
